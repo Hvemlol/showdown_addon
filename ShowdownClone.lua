@@ -13,10 +13,12 @@ local Net = require("Core.Net")
 local TeamBuilder = require("UI.TeamBuilder")
 local BattleUI = require("UI.BattleUI")
 local MinimapButton = require("UI.MinimapButton")
+local Options = require("UI.Options")
 
 ShowdownClone.TeamBuilder = TeamBuilder
 ShowdownClone.BattleUI = BattleUI
 ShowdownClone.MinimapButton = MinimapButton
+ShowdownClone.Options = Options
 
 local eventFrame = CreateFrame("Frame")
 ShowdownClone.eventFrame = eventFrame
@@ -53,16 +55,25 @@ end
 function ShowdownClone:OnInitialize()
     ShowdownCloneDB = ShowdownCloneDB or {}
     ShowdownCloneDB.team = ShowdownCloneDB.team or {}
-    ShowdownCloneDB.settings = ShowdownCloneDB.settings or { minimapShown = true }
+    ShowdownCloneDB.settings = ShowdownCloneDB.settings or {}
+    local s = ShowdownCloneDB.settings
+    if s.minimapShown == nil then s.minimapShown = true end
+    if s.defaultLevel == nil then s.defaultLevel = 100 end
+    if s.loadMessage == nil then s.loadMessage = true end
     ShowdownCloneDB.minimap = ShowdownCloneDB.minimap or { angle = 45 }
     ShowdownCloneDB.record = ShowdownCloneDB.record or { wins = 0, losses = 0 }
     state.rng = PRNG.new(PRNG.randomSeed())
 end
 
 function ShowdownClone:OnEnable()
+    Options:Register()
     MinimapButton:Create(function()
         TeamBuilder:Show()
     end)
+    -- Respect the minimap setting
+    if ShowdownCloneDB.settings and ShowdownCloneDB.settings.minimapShown == false then
+        MinimapButton:Hide()
+    end
 
     eventFrame:RegisterEvent("ADDON_LOADED")
     eventFrame:RegisterEvent("CHAT_MSG_ADDON")
@@ -78,7 +89,10 @@ function ShowdownClone:OnEnable()
     end
 
     self:OnInitialize()
-    printMsg("Loaded. Type |cffffff00/showdown|r to build your team, |cffffff00/showdown bot|r to battle a bot, or |cffffff00/showdown duel <name>|r to PvP.")
+    local s = ShowdownCloneDB.settings or {}
+    if s.loadMessage ~= false then
+        printMsg("Loaded. Type |cffffff00/showdown|r to build your team, |cffffff00/showdown bot|r to battle a bot, or |cffffff00/showdown duel <name>|r to PvP.")
+    end
 end
 
 eventFrame:SetScript("OnEvent", function(_, event, ...)
@@ -111,6 +125,8 @@ function ShowdownClone:SlashHandler(msg)
         else
             TeamBuilder:Show()
         end
+    elseif cmd == "starter" then
+        self:UseStarterTeam()
     elseif cmd == "bot" then
         local idx = tonumber(args[1])
         self:StartBotBattle(idx)
@@ -138,6 +154,7 @@ end
 function ShowdownClone:PrintHelp()
     printMsg("Commands:")
     printMsg("/showdown ui - open the team builder")
+    printMsg("/showdown starter - get the default starter team (Bulbasaur/Charmander/Squirtle)")
     printMsg("/showdown bot [n] - battle a practice bot (list with /showdown bots)")
     printMsg("/showdown bots - list practice bots")
     printMsg("/showdown duel <player> - PvP duel")
@@ -162,19 +179,22 @@ function ShowdownClone:PrintTeam()
 end
 
 -- Live team accessor. A Showdown team is exactly what the builder saved.
+-- Returns an empty list (not a default team) if the player hasn't built one;
+-- the starter team is only ever created via an explicit /showdown starter
+-- or the "Use starter team" button in the builder.
 function ShowdownClone:GetLiveTeam()
     local saved = ShowdownCloneDB.team or {}
-    if #saved == 0 then
-        -- give a default starter team so a new player can battle immediately
-        saved = {
-            Serializer.encodePokemon(BattleEngine.newPokemon(1, 100)),
-            Serializer.encodePokemon(BattleEngine.newPokemon(4, 100)),
-            Serializer.encodePokemon(BattleEngine.newPokemon(7, 100)),
-        }
-        ShowdownCloneDB.team = saved
-        printMsg("You received a default team (Bulbasaur, Charmander, Squirtle). Customize it with /showdown ui.")
-    end
     return Serializer.decodeTeam(saved, BattleEngine)
+end
+
+-- Explicitly give the player the default starter team.
+function ShowdownClone:UseStarterTeam()
+    local team = {}
+    for _, id in ipairs({ 1, 4, 7 }) do
+        team[#team + 1] = Serializer.encodePokemon(BattleEngine.newPokemon(id, 100))
+    end
+    ShowdownCloneDB.team = team
+    printMsg("Starter team ready: Bulbasaur, Charmander, Squirtle (Lv100). Customize with /showdown ui.")
 end
 
 function ShowdownClone:SaveTeam(team)
@@ -195,7 +215,7 @@ function ShowdownClone:StartBotBattle(index)
     if not self:CanStartBattle() then return end
     local team = self:GetLiveTeam()
     if #team == 0 then
-        printMsg("You need a team first! Open the team builder with /showdown ui.")
+        printMsg("You need a team first! Use /showdown starter for a default team, or /showdown ui to build one.")
         return
     end
     local idx, def
@@ -327,7 +347,7 @@ function ShowdownClone:ChallengePlayer(targetName)
     end
     local team = self:GetLiveTeam()
     if #team == 0 then
-        printMsg("You need a team first!")
+        printMsg("You need a team first! Use /showdown starter for a default team, or /showdown ui to build one.")
         return
     end
     local msg = Net.buildChallenge(myName, targetName, #team)

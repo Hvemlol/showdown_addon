@@ -71,4 +71,37 @@ function Types.isValid(name)
     return Types.index[name] ~= nil
 end
 
+-- Approximate Pokemon type colors (RGB 0-1) used for UI accents/portraits.
+-- These match the classic type color scheme used by the games and Showdown.
+Types.COLORS = {
+    Normal   = { 0.66, 0.63, 0.55 },
+    Fire     = { 0.94, 0.55, 0.24 },
+    Water    = { 0.27, 0.56, 0.93 },
+    Electric = { 0.97, 0.82, 0.20 },
+    Grass    = { 0.47, 0.79, 0.29 },
+    Ice      = { 0.59, 0.85, 0.85 },
+    Fighting = { 0.75, 0.19, 0.16 },
+    Poison   = { 0.63, 0.25, 0.63 },
+    Ground   = { 0.89, 0.75, 0.42 },
+    Flying   = { 0.66, 0.56, 0.93 },
+    Psychic  = { 0.94, 0.35, 0.54 },
+    Bug      = { 0.65, 0.71, 0.13 },
+    Rock     = { 0.71, 0.63, 0.24 },
+    Ghost    = { 0.44, 0.35, 0.60 },
+    Dragon   = { 0.44, 0.24, 0.97 },
+}
+
+-- Returns {r, g, b} for a type name (defaults to Normal gray).
+function Types.color(typeName)
+    return Types.COLORS[typeName] or Types.COLORS.Normal
+end
+
+-- Blends a type's color with a background color by `alpha` (0..1).
+-- Useful for tinting portraits/bars. Returns {r, g, b}.
+function Types.blend(typeName, alpha)
+    local c = Types.color(typeName)
+    alpha = math.max(0, math.min(1, alpha or 1))
+    return { c[1] * alpha, c[2] * alpha, c[3] * alpha }
+end
+
 return Types

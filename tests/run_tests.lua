@@ -123,6 +123,31 @@ do
         ok(not dn:match("2$"), "displayName has no trailing 2 for " .. id .. " (got '" .. dn .. "')")
     end
 
+    -- Types.COLORS / Types.color / Types.blend
+    for _, t in ipairs(Types.list) do
+        local c = Types.color(t)
+        ok(type(c) == "table" and #c == 3, "Types.color returns RGB for " .. t)
+        ok(c[1] >= 0 and c[1] <= 1 and c[2] >= 0 and c[2] <= 1 and c[3] >= 0 and c[3] <= 1,
+            "Types.color in [0,1] for " .. t)
+    end
+    local nrm = Types.color("Normal")
+    eq(Types.color("NotAType")[1], nrm[1], "Types.color unknown type falls back to Normal (R)")
+    local b = Types.blend("Fire", 0.5)
+    local fc = Types.color("Fire")
+    approx(b[1], fc[1] * 0.5, 0.001, "Types.blend scales R by alpha")
+    approx(b[2], fc[2] * 0.5, 0.001, "Types.blend scales G by alpha")
+    approx(b[3], fc[3] * 0.5, 0.001, "Types.blend scales B by alpha")
+    local b1 = Types.blend("Water", 1)
+    local wc = Types.color("Water")
+    eq(b1[1], wc[1], "Types.blend alpha=1 keeps R")
+    -- alpha > 1 is clamped to 1
+    local bClamp = Types.blend("Water", 2)
+    approx(bClamp[1], wc[1], 0.001, "Types.blend clamps alpha > 1 (R)")
+    approx(bClamp[2], wc[2], 0.001, "Types.blend clamps alpha > 1 (G)")
+    -- alpha < 0 is clamped to 0
+    local bZero = Types.blend("Water", -1)
+    approx(bZero[1], 0, 0.001, "Types.blend clamps alpha < 0 to 0 (R)")
+
     -- bot teams reference valid species and moves
     for _, def in ipairs(Bot.TEAMS) do
         ok(#def.team >= 1 and #def.team <= 6, "Bot " .. def.name .. " has 1-6 Pokemon")

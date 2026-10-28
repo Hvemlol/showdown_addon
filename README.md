@@ -32,8 +32,13 @@ leveling, no money — exactly like Showdown.
 | `/showdown duel <player>` | Challenge a player to a PvP duel |
 | `/showdown accept` / `/showdown decline` | Respond to a duel challenge |
 | `/showdown cancel` | Cancel your pending duel challenge |
+| `/showdown starter` | Get the default starter team (Bulbasaur/Charmander/Squirtle) |
 | `/showdown team` | Print your team to chat |
 | `/showdown record` | Show your win/loss record |
+
+An **options panel** is registered under `Esc → Interface → AddOns → Showdown Clone`
+with: show/hide minimap button, default team level (1–100), show/hide the
+login message, and reset win/loss record.
 
 ### WoW integration notes
 - Both windows (team builder, battle) support **Esc to close** and have a
@@ -45,6 +50,11 @@ leveling, no money — exactly like Showdown.
 - Move buttons show human-readable names and **tooltips** (type, power,
   accuracy, PP, category, effect) on hover.
 - HP bars are color-coded green/yellow/red by remaining HP.
+- Each Pokemon in battle has a **type-colored portrait** (tinted by primary
+  type, with a hover tooltip showing type/HP/status).
+- The team builder has a per-slot **Remove** button, an **overwrite
+  confirmation** dialog, and a **"Use starter team"** button (the starter team
+  is never written to saved variables silently).
 
 ## Project layout
 
@@ -66,6 +76,7 @@ UI/
   MinimapButton.lua   Draggable minimap button
   TeamBuilder.lua     Team builder: 6 slots, species browser, legal move picker
   BattleUI.lua        Battle window: HP bars, move buttons, switch/forfeit, log
+  Options.lua         Interface Options panel (minimap, default level, etc.)
 tests/                Headless test runner (LuaJIT via lupa, or any Lua 5.1)
 ```
 

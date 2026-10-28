@@ -1,6 +1,7 @@
 local BattleUI = {}
 
 local Moves = require("Core.Data.Moves")
+local Types = require("Core.Data.Types")
 local BattleEngine = require("Core.BattleEngine")
 
 local frame
@@ -77,21 +78,23 @@ function BattleUI:Build()
     frame:SetPropagateKeyboardInput(true)
     tinsert(UISpecialFrames, frame:GetName())
 
-    -- Foe area (top)
+    -- Foe area (top): type-colored portrait + name + HP
+    frame.foePortrait = self:MakePortrait(frame, "TOPLEFT", 16, -36, 48)
     frame.foeName = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    frame.foeName:SetPoint("TOPLEFT", 16, -40)
+    frame.foeName:SetPoint("LEFT", frame.foePortrait, "RIGHT", 8, 10)
     frame.foeHp = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     frame.foeHp:SetPoint("TOPLEFT", frame.foeName, "BOTTOMLEFT", 0, -4)
-    frame.foeBar = self:MakeHpBar(frame, "TOPLEFT", 16, -80, 240)
+    frame.foeBar = self:MakeHpBar(frame, "TOPLEFT", 16, -92, 240)
     frame.foeBarText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     frame.foeBarText:SetPoint("LEFT", frame.foeBar, "RIGHT", 8, 0)
 
-    -- Player area (bottom)
+    -- Player area (bottom): type-colored portrait + name + HP
+    frame.playerPortrait = self:MakePortrait(frame, "BOTTOMLEFT", 16, 100, 48)
     frame.playerName = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    frame.playerName:SetPoint("BOTTOMLEFT", 16, 150)
+    frame.playerName:SetPoint("LEFT", frame.playerPortrait, "RIGHT", 8, 10)
     frame.playerHp = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     frame.playerHp:SetPoint("TOPLEFT", frame.playerName, "BOTTOMLEFT", 0, -4)
-    frame.playerBar = self:MakeHpBar(frame, "BOTTOMLEFT", 16, 110, 240)
+    frame.playerBar = self:MakeHpBar(frame, "BOTTOMLEFT", 16, 60, 240)
     frame.playerBarText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     frame.playerBarText:SetPoint("LEFT", frame.playerBar, "RIGHT", 8, 0)
 
@@ -196,6 +199,50 @@ function BattleUI:ColorHpBar(bar, hp, maxHp)
     end
 end
 
+-- A type-colored portrait: a rounded square tinted by the Pokemon's primary
+-- type, with a letter (first letter of the species name) on top. This gives
+-- each side a visual "actor" in the arena without needing real sprites.
+function BattleUI:MakePortrait(parent, point, x, y, size)
+    local holder = CreateFrame("Frame", nil, parent)
+    holder:SetSize(size, size)
+    holder:SetPoint(point, x, y)
+    local bg = holder:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(0.15, 0.15, 0.18, 1)
+    local tint = holder:CreateTexture(nil, "ARTWORK")
+    tint:SetAllPoints()
+    tint:SetColorTexture(0.5, 0.5, 0.5, 1)
+    local letter = holder:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    letter:SetPoint("CENTER")
+    letter:SetText("?")
+    holder.bg = bg
+    holder.tint = tint
+    holder.letter = letter
+    return holder
+end
+
+-- Update a portrait for the given Pokemon instance
+function BattleUI:SetPortrait(holder, pokemon)
+    if not holder or not pokemon then return end
+    local primaryType = pokemon.types and pokemon.types[1] or "Normal"
+    local c = Types.color(primaryType)
+    holder.tint:SetColorTexture(c[1], c[2], c[3], 0.85)
+    local name = pokemon.name or "?"
+    holder.letter:SetText(name:sub(1, 1):upper())
+    -- Tooltip with species info
+    holder:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:SetText(name .. " Lv" .. (pokemon.level or 100), 1, 1, 1)
+        GameTooltip:AddLine("Type: " .. table.concat(pokemon.types or { "?" }, "/"), c[1], c[2], c[3])
+        GameTooltip:AddLine(string.format("HP: %d/%d", pokemon.hp or 0, pokemon.maxHp or 0), 0.8, 0.8, 0.8)
+        if pokemon.status then
+            GameTooltip:AddLine("Status: " .. pokemon.status, 1, 0.4, 0.4)
+        end
+        GameTooltip:Show()
+    end)
+    holder:SetScript("OnLeave", function() GameTooltip:Hide() end)
+end
+
 function BattleUI:AppendLog(msg)
     if not frame then return end
     local content = frame.logContent
@@ -234,6 +281,7 @@ function BattleUI:Refresh()
         frame.playerBar:SetValue(my.hp)
         frame.playerBarText:SetText(hpText(my))
         self:ColorHpBar(frame.playerBar, my.hp, my.maxHp)
+        self:SetPortrait(frame.playerPortrait, my)
     end
     if foe then
         frame.foeName:SetText(foe.name .. " Lv" .. foe.level .. statusText(foe))
@@ -242,6 +290,7 @@ function BattleUI:Refresh()
         frame.foeBar:SetValue(foe.hp)
         frame.foeBarText:SetText(hpText(foe))
         self:ColorHpBar(frame.foeBar, foe.hp, foe.maxHp)
+        self:SetPortrait(frame.foePortrait, foe)
     end
     -- Enable move buttons only when we actually need a player choice.
     -- This prevents the PvP double-click bug where a second click would
