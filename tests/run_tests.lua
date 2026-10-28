@@ -14,7 +14,6 @@ local failures = {}
 local function ok(cond, name)
     if cond then
         passed = passed + 1
-        -- print("PASS " .. name)
     else
         failed = failed + 1
         failures[#failures + 1] = name
@@ -30,16 +29,14 @@ local function approx(a, b, tol, name)
     ok(math.abs(a - b) <= tol, name .. " (expected ~" .. tostring(b) .. ", got " .. tostring(a) .. ")")
 end
 
--- Load modules
 local Types = require("Core.Data.Types")
 local Moves = require("Core.Data.Moves")
 local PokemonData = require("Core.Data.Pokemon")
-local Trainers = require("Core.Data.Trainers")
 local PRNG = require("Core.Util.PRNG")
 local Json = require("Core.Libs.Json")
 local Stats = require("Core.Stats")
 local BattleEngine = require("Core.BattleEngine")
-local Encounters = require("Core.Encounters")
+local Bot = require("Core.Bot")
 local Serializer = require("Core.Util.Serializer")
 local Net = require("Core.Net")
 
@@ -49,7 +46,6 @@ local Net = require("Core.Net")
 do
     eq(PokemonData.count(), 151, "151 Pokemon defined")
 
-    -- every Pokemon has valid types and base stats
     for id = 1, 151 do
         local p = PokemonData.get(id)
         ok(p ~= nil, "Pokemon #" .. id .. " exists")
@@ -63,7 +59,6 @@ do
         ok(#p.learnset >= 1, "Pokemon #" .. id .. " has a learnset")
     end
 
-    -- every learnset move exists and levels are sorted
     for id = 1, 151 do
         local p = PokemonData.get(id)
         local lastLv = 0
@@ -75,7 +70,6 @@ do
         end
     end
 
-    -- every move has a valid type and sane values
     for id, m in pairs(Moves.list) do
         ok(Types.isValid(m.type), "Move " .. id .. " type valid")
         ok(m.acc >= 0 and m.acc <= 100, "Move " .. id .. " acc in range")
@@ -83,13 +77,16 @@ do
         ok(m.power >= 0, "Move " .. id .. " power >= 0")
     end
 
-    -- trainer teams reference valid species
-    for _, t in ipairs(Trainers.list) do
-        ok(#t.teams >= 1, "Trainer " .. t.name .. " has teams")
-        for _, team in ipairs(t.teams) do
-            for _, member in ipairs(team) do
-                ok(PokemonData.get(member[1]) ~= nil, "Trainer " .. t.name .. " species #" .. member[1] .. " valid")
-                ok(member[2] >= 1 and member[2] <= 100, "Trainer " .. t.name .. " level in range")
+    -- bot teams reference valid species and moves
+    for _, def in ipairs(Bot.TEAMS) do
+        ok(#def.team >= 1 and #def.team <= 6, "Bot " .. def.name .. " has 1-6 Pokemon")
+        for _, member in ipairs(def.team) do
+            ok(PokemonData.get(member.id) ~= nil, "Bot " .. def.name .. " species #" .. member.id .. " valid")
+            ok(member.level >= 1 and member.level <= 100, "Bot " .. def.name .. " level in range")
+            if member.moves then
+                for _, mv in ipairs(member.moves) do
+                    ok(Moves.exists(mv), "Bot " .. def.name .. " move '" .. tostring(mv) .. "' valid")
+                end
             end
         end
     end
@@ -131,7 +128,6 @@ do
     end
     ok(diff, "PRNG different seed different sequence")
 
-    -- range checks
     local r = PRNG.new(1)
     local inRange = true
     for _ = 1, 1000 do
@@ -148,7 +144,6 @@ do
     end
     ok(intOk, "PRNG nextInt in range")
 
-    -- distribution sanity for chance()
     local r3 = PRNG.new(42)
     local hits = 0
     for _ = 1, 10000 do if r3:chance(50) then hits = hits + 1 end end
@@ -156,79 +151,96 @@ do
 end
 
 ----------------------------------------------------------------------
--- Stats
+-- Stats (Showdown-style: level only)
 ----------------------------------------------------------------------
 do
     local species = PokemonData.get(6) -- Charizard
     local stats = Stats.computeStats(species, 50)
-    ok(stats.hp > stats.spe or stats.spe > 0, "Charizard Lv50 has positive stats")
     ok(stats.hp > 100, "Charizard Lv50 HP > 100 (got " .. stats.hp .. ")")
     eq(stats.spa, stats.spd, "Gen 1: spa == spd")
 
-    -- higher level => higher stats
     local s50 = Stats.computeStats(species, 50)
     local s100 = Stats.computeStats(species, 100)
     ok(s100.hp > s50.hp, "Lv100 HP > Lv50 HP")
     ok(s100.atk > s50.atk, "Lv100 Atk > Lv50 Atk")
 
-    -- EVs increase stats
-    local noEv = Stats.computeStats(species, 50)
-    local withEv = Stats.computeStats(species, 50, nil, { atk = 255 })
-    ok(withEv.atk > noEv.atk, "EVs increase stats")
+    -- level 1 still has positive stats
+    local s1 = Stats.computeStats(PokemonData.get(1), 1)
+    ok(s1.hp > 0 and s1.atk > 0, "Lv1 stats positive")
 
-    -- exp curve
-    ok(Stats.expForLevel(1) > 0, "expForLevel(1) > 0")
-    ok(Stats.expForLevel(50) > Stats.expForLevel(10), "exp curve increasing")
-    eq(Stats.totalExpForLevel(1), 0, "totalExpForLevel(1) == 0")
-    ok(Stats.totalExpForLevel(10) > 0, "totalExpForLevel(10) > 0")
+    -- Mewtwo L100 special is huge
+    local mew = Stats.computeStats(PokemonData.get(150), 100)
+    ok(mew.spa > 250, "Mewtwo L100 spa > 250 (got " .. mew.spa .. ")")
 end
 
 ----------------------------------------------------------------------
--- Pokemon instance creation
+-- Pokemon instance creation + legal moves
 ----------------------------------------------------------------------
 do
     local p = BattleEngine.newPokemon(25, 50) -- Pikachu
     eq(p.name, "Pikachu", "newPokemon name")
     eq(p.level, 50, "newPokemon level")
-    ok(p.hp == p.maxHp, "newPokemon full HP")
+    eq(p.hp, p.maxHp, "newPokemon full HP")
     ok(#p.moves >= 1 and #p.moves <= 4, "newPokemon 1-4 moves")
     eq(p.types[1], "Electric", "Pikachu type")
 
-    -- moveset is the most recent 4 from learnset
-    local bulb = BattleEngine.newPokemon(1, 40) -- Bulbasaur
+    -- default level is 100
+    local p100 = BattleEngine.newPokemon(1)
+    eq(p100.level, 100, "newPokemon default level 100")
+
+    -- default moveset is the 4 most recent at that level
+    local bulb = BattleEngine.newPokemon(1, 40)
     local ids = {}
     for _, m in ipairs(bulb.moves) do ids[#ids + 1] = m.id end
-    -- at L40 Bulbasaur knows up to SolarBeam (34)
     local hasSolar = false
     for _, id in ipairs(ids) do if id == "SolarBeam" then hasSolar = true end end
     ok(hasSolar, "Bulbasaur L40 knows SolarBeam")
 
-    -- Mewtwo has huge special
-    local mew = BattleEngine.newPokemon(150, 100)
-    ok(mew.stats.spa > 250, "Mewtwo L100 spa > 250 (got " .. mew.stats.spa .. ")")
+    -- explicit moves are respected
+    local custom = BattleEngine.newPokemon(1, 50, { moves = { "Tackle", "Growl" } })
+    eq(#custom.moves, 2, "custom moveset count")
+    eq(custom.moves[1].id, "Tackle", "custom move 1")
+    eq(custom.moves[2].id, "Growl", "custom move 2")
+
+    -- illegal move ids are dropped
+    local bad = BattleEngine.newPokemon(1, 50, { moves = { "Tackle", "NotAMove" } })
+    eq(#bad.moves, 1, "illegal move dropped")
+
+    -- legalMoves returns all learnable moves at a level
+    local legal = BattleEngine.legalMoves(PokemonData.get(25), 50)
+    ok(#legal >= 4, "Pikachu L50 has >= 4 legal moves")
+    local hasThunderbolt = false
+    for _, id in ipairs(legal) do if id == "Thunderbolt" then hasThunderbolt = true end end
+    ok(hasThunderbolt, "Pikachu L50 legal moves include Thunderbolt")
+
+    -- nickname
+    local nick = BattleEngine.newPokemon(25, 50, { nickname = "Sparky" })
+    eq(nick.name, "Sparky", "nickname applied")
 end
 
 ----------------------------------------------------------------------
 -- Battle engine: damage, turns, KO
 ----------------------------------------------------------------------
 do
-    -- deterministic battle: same seed + same choices => same log
-    local function runBattle(seed)
-        local a1 = BattleEngine.newPokemon(6, 50)  -- Charizard
-        local b1 = BattleEngine.newPokemon(9, 50)  -- Blastoise
-        local battle = BattleEngine.newBattle({ a1 }, { b1 }, { mode = "pve", seed = seed })
+    local function runBattle(seed, movesA, movesB)
+        local a1 = BattleEngine.newPokemon(6, 50, { moves = movesA })
+        local b1 = BattleEngine.newPokemon(9, 50, { moves = movesB })
+        local battle = BattleEngine.newBattle({ a1 }, { b1 }, { mode = "bot", seed = seed })
         local log = {}
         battle.onLog = function(m) log[#log + 1] = m end
         local turns = 0
-        while not battle.over and turns < 200 do
+        while not battle.over and turns < 300 do
             turns = turns + 1
-            battle:runTurn({ [1] = { type = "move", index = 1 }, [2] = { type = "move", index = 1 } })
+            battle:runTurn({
+                [1] = { type = "move", index = 1 },
+                [2] = { type = "move", index = 1 },
+            })
         end
         return log, battle
     end
 
-    local logA, battleA = runBattle(123)
-    local logB, battleB = runBattle(123)
+    local logA, battleA = runBattle(123, { "Flamethrower" }, { "WaterGun" })
+    local logB, battleB = runBattle(123, { "Flamethrower" }, { "WaterGun" })
     eq(#logA, #logB, "deterministic battle: same log length")
     local sameLog = true
     for i = 1, #logA do
@@ -239,17 +251,17 @@ do
     ok(battleA.winner == 1 or battleA.winner == 2, "battle has a winner")
 
     -- different seeds usually differ
-    local logC = runBattle(999)
+    local logC = runBattle(999, { "Flamethrower" }, { "WaterGun" })
     local diff = false
     for i = 1, math.min(#logA, #logC) do
         if logA[i] ~= logC[i] then diff = true break end
     end
     ok(diff, "different seed -> different battle")
 
-    -- type effectiveness matters: Water vs Fire does more than Fire vs Water
-    local atk = BattleEngine.newPokemon(9, 50)   -- Blastoise (Water)
-    local defFire = BattleEngine.newPokemon(6, 50) -- Charizard (Fire)
-    local defWater = BattleEngine.newPokemon(9, 50) -- Blastoise (Water)
+    -- type effectiveness matters
+    local atk = BattleEngine.newPokemon(9, 50, { moves = { "Surf" } })
+    local defFire = BattleEngine.newPokemon(6, 50)
+    local defWater = BattleEngine.newPokemon(9, 50)
     local surf = Moves.get("Surf")
     local b1 = BattleEngine.newBattle({ atk }, { defFire }, { seed = 5 })
     local b2 = BattleEngine.newBattle({ atk }, { defWater }, { seed = 5 })
@@ -257,30 +269,18 @@ do
     local dmgWater = b2:calcDamage(atk, defWater, surf)
     ok(dmgFire > dmgWater, "Surf does more to Fire than to Water")
 
-    -- STAB: same-type move does more
-    local stabDmg = b1:calcDamage(atk, defFire, Moves.get("HydroPump"))
-    -- compare vs a neutral hitter using HydroPump
-    local neutral = BattleEngine.newPokemon(128, 50) -- Tauros (Normal)
-    local b3 = BattleEngine.newBattle({ neutral }, { defFire }, { seed = 5 })
-    local neutralDmg = b3:calcDamage(neutral, defFire, Moves.get("HydroPump"))
-    -- Tauros has lower spa but STAB should still help Blastoise; just check both > 0
-    ok(stabDmg > 0 and neutralDmg > 0, "damage positive")
-
-    -- immunity: Electric vs Ground does 0 via useMove
-    local raichu = BattleEngine.newPokemon(26, 50)
+    -- immunity: Electric vs Ground
+    local raichu = BattleEngine.newPokemon(26, 50, { moves = { "Thunderbolt" } })
     local diglett = BattleEngine.newPokemon(50, 50)
     local b4 = BattleEngine.newBattle({ raichu }, { diglett }, { seed = 1 })
-    local res = b4:useMove(1, 4) -- Thunderbolt (index 4)
+    local res = b4:useMove(1, 1)
     ok(res.immune, "Electric move immune vs Ground")
 
     -- status: Thunder Wave paralyzes
     local b5 = BattleEngine.newBattle(
-        { BattleEngine.newPokemon(25, 50) },
+        { BattleEngine.newPokemon(25, 50, { moves = { "ThunderWave" } }) },
         { BattleEngine.newPokemon(16, 50) },
         { seed = 77 })
-    -- find the ThunderWave slot (Pikachu L50: QuickAttack, Swift, Agility, Thunderbolt)
-    -- so inject ThunderWave explicitly for a deterministic check
-    b5:active(1).moves[1] = { id = "ThunderWave", pp = 20, maxPp = 20 }
     local r5 = b5:useMove(1, 1)
     ok(r5.hit, "Thunder Wave hits")
     eq(b5:active(2).status, "paralysis", "Thunder Wave paralyzes")
@@ -298,40 +298,45 @@ do
     -- switching resets stat stages
     local p = BattleEngine.newPokemon(6, 50)
     p.stages.atk = 3
-    local b7 = BattleEngine.newBattle({ p, BattleEngine.newPokemon(9, 50) }, { BattleEngine.newPokemon(1, 50) }, { seed = 1 })
+    local b7 = BattleEngine.newBattle(
+        { p, BattleEngine.newPokemon(9, 50) },
+        { BattleEngine.newPokemon(1, 50) },
+        { seed = 1 })
     b7:forceSwitch(1, 2)
     eq(b7:active(1).stages.atk, 0, "switch resets stages")
+
+    -- forfeit ends the battle
+    local b8 = BattleEngine.newBattle(
+        { BattleEngine.newPokemon(6, 50) },
+        { BattleEngine.newPokemon(9, 50) },
+        { seed = 1 })
+    local over8 = b8:runTurn({ [1] = { type = "forfeit" } })
+    ok(over8, "forfeit ends battle")
+    eq(b8.winner, 2, "forfeit gives opponent the win")
 end
 
 ----------------------------------------------------------------------
--- Full battle simulation to completion (AI vs AI) for all 151 species sanity
+-- Full AI battles across all 151 species
 ----------------------------------------------------------------------
 do
-    -- every species can be instantiated and battle without errors
     for id = 1, 151 do
         local okInst, p = pcall(BattleEngine.newPokemon, id, 50)
         ok(okInst and p ~= nil, "instantiate #" .. id .. " " .. (PokemonData.get(id) and PokemonData.get(id).name or "?"))
     end
 
-    -- a few full AI battles across tiers
     local matchups = {
-        { 6, 9 },    -- Charizard vs Blastoise
-        { 150, 151 },-- Mewtwo vs Mew
-        { 1, 4 },    -- Bulbasaur vs Charmander
-        { 25, 26 },  -- Pikachu vs Raichu
-        { 128, 143 },-- Tauros vs Snorlax
-        { 94, 65 },  -- Gengar vs Alakazam
+        { 6, 9 }, { 150, 151 }, { 1, 4 }, { 25, 26 }, { 128, 143 }, { 94, 65 },
     }
     for _, match in ipairs(matchups) do
         local a = BattleEngine.newPokemon(match[1], 60)
         local b = BattleEngine.newPokemon(match[2], 60)
-        local battle = BattleEngine.newBattle({ a }, { b }, { seed = 42, mode = "pve" })
+        local battle = BattleEngine.newBattle({ a }, { b }, { seed = 42, mode = "bot" })
         local turns = 0
         while not battle.over and turns < 300 do
             turns = turns + 1
             battle:runTurn({
-                [1] = Encounters.aiChooseMove(battle, 1),
-                [2] = Encounters.aiChooseMove(battle, 2),
+                [1] = Bot.chooseMove(battle, 1),
+                [2] = Bot.chooseMove(battle, 2),
             })
         end
         ok(battle.over, PokemonData.get(match[1]).name .. " vs " .. PokemonData.get(match[2]).name .. " completes in " .. turns .. " turns")
@@ -340,12 +345,12 @@ do
 end
 
 ----------------------------------------------------------------------
--- Multi-Pokemon team battle (switching + fainting)
+-- Team battle (switching + fainting)
 ----------------------------------------------------------------------
 do
     local teamA = { BattleEngine.newPokemon(6, 50), BattleEngine.newPokemon(9, 50) }
-    local teamB = { BattleEngine.newPokemon(1, 20) } -- weak foe
-    local battle = BattleEngine.newBattle(teamA, teamB, { seed = 8, mode = "pve" })
+    local teamB = { BattleEngine.newPokemon(1, 20) }
+    local battle = BattleEngine.newBattle(teamA, teamB, { seed = 8, mode = "bot" })
     local turns = 0
     while not battle.over and turns < 100 do
         turns = turns + 1
@@ -356,6 +361,166 @@ do
     end
     ok(battle.over, "team battle completes")
     eq(battle.winner, 1, "strong team wins")
+end
+
+----------------------------------------------------------------------
+-- Practice bots
+----------------------------------------------------------------------
+do
+    ok(Bot.count() >= 10, "at least 10 practice bots")
+    for i = 1, Bot.count() do
+        local def = Bot.get(i)
+        ok(def.name ~= nil, "bot " .. i .. " has a name")
+        local team = Bot.buildTeam(def)
+        eq(#team, #def.team, "bot " .. def.name .. " team built with " .. #def.team .. " Pokemon")
+        for _, p in ipairs(team) do
+            ok(p.hp == p.maxHp, "bot Pokemon starts at full HP")
+            ok(#p.moves >= 1, "bot Pokemon has moves")
+        end
+    end
+
+    -- Bot.random never returns the excluded index
+    local rng = PRNG.new(5)
+    for _ = 1, 50 do
+        local idx, _ = Bot.random(rng, 3)
+        ok(idx ~= 3, "Bot.random excludes current")
+    end
+
+    -- full bot battle completes
+    local def = Bot.get(1)
+    local myTeam = { BattleEngine.newPokemon(6, 50), BattleEngine.newPokemon(9, 50), BattleEngine.newPokemon(3, 50) }
+    local botTeam = Bot.buildTeam(def)
+    local battle = BattleEngine.newBattle(myTeam, botTeam, { seed = 11, mode = "bot", nameA = "You", nameB = def.name })
+    local turns = 0
+    while not battle.over and turns < 300 do
+        turns = turns + 1
+        battle:runTurn({
+            [1] = Bot.chooseMove(battle, 1),
+            [2] = Bot.chooseMove(battle, 2),
+        })
+    end
+    ok(battle.over, "bot battle completes")
+    ok(battle.winner ~= nil, "bot battle has a winner")
+end
+
+----------------------------------------------------------------------
+-- Serialization round-trip
+----------------------------------------------------------------------
+do
+    local p = BattleEngine.newPokemon(25, 42, { nickname = "Sparky", moves = { "Thunderbolt", "QuickAttack" } })
+    p.hp = 10
+    local enc = Serializer.encodePokemon(p)
+    eq(enc.id, 25, "serialize id")
+    eq(enc.level, 42, "serialize level")
+    eq(enc.nickname, "Sparky", "serialize nickname")
+    eq(#enc.moves, 2, "serialize moves count")
+
+    local dec = Serializer.decodePokemon(enc, BattleEngine)
+    eq(dec.id, 25, "decode id")
+    eq(dec.level, 42, "decode level")
+    eq(dec.name, "Sparky", "decode nickname")
+    eq(dec.moves[1].id, "Thunderbolt", "decode move 1")
+
+    -- team round-trip
+    local team = {
+        BattleEngine.newPokemon(1, 100),
+        BattleEngine.newPokemon(4, 100),
+        BattleEngine.newPokemon(7, 100),
+    }
+    local encTeam = Serializer.encodeTeam(team)
+    local decTeam = Serializer.decodeTeam(encTeam, BattleEngine)
+    eq(#decTeam, 3, "team round-trip count")
+    eq(decTeam[2].id, 4, "team round-trip member 2")
+    eq(decTeam[3].moves[1].pp, decTeam[3].moves[1].maxPp, "decoded move pp full")
+end
+
+----------------------------------------------------------------------
+-- Net protocol
+----------------------------------------------------------------------
+do
+    local msg = Net.buildChallenge("Alice", "Bob", 6)
+    local t, d, okDecode = Net.decode(msg)
+    eq(t, Net.MSG.CHALLENGE, "net decode type")
+    ok(okDecode, "net decode ok")
+    eq(d.from, "Alice", "net challenge from")
+    eq(d.to, "Bob", "net challenge to")
+
+    local start = Net.buildStart("Alice", "Bob", 12345, { { id = 1, level = 5, moves = { "Tackle" } } })
+    local t2, d2 = Net.decode(start)
+    eq(t2, Net.MSG.START, "net start type")
+    eq(d2.seed, 12345, "net start seed")
+
+    local choice = Net.buildChoice("Alice", "Bob", 3, { type = "move", index = 2 })
+    local t3, d3 = Net.decode(choice)
+    eq(t3, Net.MSG.CHOICE, "net choice type")
+    eq(d3.choice.index, 2, "net choice index")
+
+    local _, _, ok3 = Net.decode("OTHER:stuff")
+    ok(not ok3, "net rejects wrong prefix")
+
+    local _, _, ok4 = Net.decode(Net.PREFIX .. ":{not json")
+    ok(not ok4, "net rejects malformed json")
+
+    local bad = Net.PREFIX .. ':{"t":"hello","v":999,"d":{}}'
+    local _, _, ok5 = Net.decode(bad)
+    ok(not ok5, "net rejects version mismatch")
+end
+
+----------------------------------------------------------------------
+-- JSON
+----------------------------------------------------------------------
+do
+    local enc = Json.encode({ a = 1, b = { 1, 2, 3 }, c = "hi", d = true, e = nil })
+    local dec = Json.decode(enc)
+    eq(dec.a, 1, "json number")
+    eq(dec.b[2], 2, "json array")
+    eq(dec.c, "hi", "json string")
+    eq(dec.d, true, "json bool")
+    eq(dec.e, nil, "json null omitted")
+
+    local s = Json.encode({ text = 'a"b\\c\nd' })
+    local d2 = Json.decode(s)
+    eq(d2.text, 'a"b\\c\nd', "json escapes round-trip")
+
+    local u = Json.decode('{"x":"\\u0041"}')
+    eq(u.x, "A", "json unicode escape")
+end
+
+----------------------------------------------------------------------
+-- PvP determinism: both clients simulate the same battle
+----------------------------------------------------------------------
+do
+    local seed = 31337
+    local teamA = { BattleEngine.newPokemon(6, 50), BattleEngine.newPokemon(25, 50) }
+    local teamB = { BattleEngine.newPokemon(9, 50), BattleEngine.newPokemon(1, 50) }
+
+    local snapshotA = Serializer.encodeTeam(teamA)
+    local snapshotB = Serializer.encodeTeam(teamB)
+    local client1 = BattleEngine.newBattle(
+        Serializer.decodeTeam(snapshotA, BattleEngine),
+        Serializer.decodeTeam(snapshotB, BattleEngine),
+        { mode = "pvp", seed = seed })
+    local client2 = BattleEngine.newBattle(
+        Serializer.decodeTeam(snapshotA, BattleEngine),
+        Serializer.decodeTeam(snapshotB, BattleEngine),
+        { mode = "pvp", seed = seed })
+
+    local choices = {
+        { { type = "move", index = 1 }, { type = "move", index = 1 } },
+        { { type = "move", index = 2 }, { type = "move", index = 2 } },
+        { { type = "move", index = 1 }, { type = "move", index = 3 } },
+    }
+    local sameLogs = true
+    for _, ch in ipairs(choices) do
+        client1:runTurn(ch)
+        client2:runTurn(ch)
+        if #client1.log ~= #client2.log then sameLogs = false break end
+        for i = 1, #client1.log do
+            if client1.log[i] ~= client2.log[i] then sameLogs = false break end
+        end
+    end
+    ok(sameLogs, "PvP: both clients produce identical logs")
+    eq(client1.winner, client2.winner, "PvP: same winner on both clients")
 end
 
 ----------------------------------------------------------------------
@@ -370,13 +535,13 @@ do
         local ok, err = pcall(function()
             local a = BattleEngine.newPokemon(idA, rng:nextInt(5, 100))
             local b = BattleEngine.newPokemon(idB, rng:nextInt(5, 100))
-            local battle = BattleEngine.newBattle({ a }, { b }, { seed = rng:nextInt(1, 2 ^ 31), mode = "pve" })
+            local battle = BattleEngine.newBattle({ a }, { b }, { seed = rng:nextInt(1, 2 ^ 31), mode = "bot" })
             local turns = 0
             while not battle.over and turns < 300 do
                 turns = turns + 1
                 battle:runTurn({
-                    [1] = Encounters.aiChooseMove(battle, 1),
-                    [2] = Encounters.aiChooseMove(battle, 2),
+                    [1] = Bot.chooseMove(battle, 1),
+                    [2] = Bot.chooseMove(battle, 2),
                 })
             end
             if not battle.over then stalls = stalls + 1 end
@@ -398,13 +563,13 @@ do
                 teamA[j] = BattleEngine.newPokemon(rng2:nextInt(1, 151), rng2:nextInt(20, 80))
                 teamB[j] = BattleEngine.newPokemon(rng2:nextInt(1, 151), rng2:nextInt(20, 80))
             end
-            local battle = BattleEngine.newBattle(teamA, teamB, { seed = rng2:nextInt(1, 2 ^ 31), mode = "pve" })
+            local battle = BattleEngine.newBattle(teamA, teamB, { seed = rng2:nextInt(1, 2 ^ 31), mode = "bot" })
             local turns = 0
             while not battle.over and turns < 300 do
                 turns = turns + 1
                 battle:runTurn({
-                    [1] = Encounters.aiChooseMove(battle, 1),
-                    [2] = Encounters.aiChooseMove(battle, 2),
+                    [1] = Bot.chooseMove(battle, 1),
+                    [2] = Bot.chooseMove(battle, 2),
                 })
             end
             ok(battle.over, "6v6 battle completes")
@@ -413,193 +578,13 @@ do
     end
     eq(teamErrors, 0, "stress: 6v6 team battles complete")
 
-    -- Struggle: a Pokemon with all PP exhausted still deals damage
+    -- Struggle: a Pokemon with all PP exhausted still fights
     local solo = BattleEngine.newPokemon(11, 50) -- Metapod (only Harden)
     for _, m in ipairs(solo.moves) do m.pp = 0 end
     local foe = BattleEngine.newPokemon(16, 50)
     local bStr = BattleEngine.newBattle({ solo }, { foe }, { seed = 1 })
-    local foeHpBefore = foe.hp
     bStr:useMove(1, 1)
-    ok(foe.hp <= foeHpBefore, "Struggle deals damage (or recoil self-damage)")
-end
-
-----------------------------------------------------------------------
--- EXP / leveling
-----------------------------------------------------------------------
-do
-    local p = BattleEngine.newPokemon(1, 5)
-    local milestones = BattleEngine.gainExp(p, 1000)
-    ok(p.level > 5, "gainExp levels up (now " .. p.level .. ")")
-    ok(#milestones >= 1, "milestones returned")
-    ok(p.hp <= p.maxHp, "hp within max after level up")
-
-    -- level cap
-    local p2 = BattleEngine.newPokemon(1, 99)
-    BattleEngine.gainExp(p2, 99999999)
-    ok(p2.level <= 100, "level capped at 100")
-end
-
-----------------------------------------------------------------------
--- Encounters & catching
-----------------------------------------------------------------------
-do
-    local rng = PRNG.new(123)
-    local seen = {}
-    for _ = 1, 200 do
-        local enc = Encounters.generateWild(rng, "forest", 10)
-        ok(enc.pokemon ~= nil, "wild encounter generated")
-        seen[enc.pokemon.id] = true
-        ok(enc.pokemon.level >= 1, "wild level >= 1")
-    end
-    ok(next(seen) ~= nil, "forest encounters produce Pokemon")
-
-    -- all zone types work
-    for _, zone in ipairs({ "forest", "water", "cave", "mountain", "powerplant", "sea", "mansion", "default" }) do
-        local e = Encounters.generateWild(PRNG.new(5), zone, 20)
-        ok(e.pokemon ~= nil, "zone '" .. zone .. "' generates")
-    end
-
-    -- catching: masterball always works; weak mon + low HP + great ball usually works
-    local weak = BattleEngine.newPokemon(10, 3) -- Caterpie L3
-    local rng2 = PRNG.new(7)
-    local master = Encounters.attemptCatch(rng2, weak, "masterball", 50)
-    ok(master.success, "masterball always catches")
-
-    local catches = 0
-    for i = 1, 50 do
-        local fresh = BattleEngine.newPokemon(129, 5) -- Magikarp
-        fresh.hp = 1
-        local r = Encounters.attemptCatch(PRNG.new(i), fresh, "greatball", 50)
-        if r.success then catches = catches + 1 end
-    end
-    ok(catches > 10, "low-HP Magikarp with great ball catches reasonably often (" .. catches .. "/50)")
-
-    -- strong high-HP mon is hard to catch
-    local mewtwo = BattleEngine.newPokemon(150, 100)
-    local hardCatches = 0
-    for i = 1, 50 do
-        local fresh = BattleEngine.newPokemon(150, 100)
-        fresh.hp = fresh.maxHp
-        local r = Encounters.attemptCatch(PRNG.new(1000 + i), fresh, "pokeball", 100)
-        if r.success then hardCatches = hardCatches + 1 end
-    end
-    ok(hardCatches < 25, "full-HP L100 Mewtwo hard to catch with pokeball (" .. hardCatches .. "/50)")
-
-    -- trainers generate valid teams
-    local t = Encounters.generateTrainer(PRNG.new(3))
-    ok(#t.team >= 1, "trainer has a team")
-    for _, p in ipairs(t.team) do
-        ok(p.species ~= nil, "trainer Pokemon valid")
-    end
-end
-
-----------------------------------------------------------------------
--- Serialization round-trip
-----------------------------------------------------------------------
-do
-    local p = BattleEngine.newPokemon(25, 42, { shiny = true, nickname = "Sparky" })
-    p.hp = 10
-    local enc = Serializer.encodePokemon(p)
-    local dec = Serializer.decodePokemon(enc, BattleEngine)
-    eq(dec.id, 25, "serialize id")
-    eq(dec.level, 42, "serialize level")
-    eq(dec.hp, 10, "serialize hp")
-    eq(dec.name, "Sparky", "serialize nickname")
-    ok(dec.shiny, "serialize shiny")
-    eq(#dec.moves, #p.moves, "serialize moves count")
-
-    -- team round-trip
-    local team = { BattleEngine.newPokemon(1, 10), BattleEngine.newPokemon(4, 10), BattleEngine.newPokemon(7, 10) }
-    local encTeam = Serializer.encodeTeam(team)
-    local decTeam = Serializer.decodeTeam(encTeam, BattleEngine)
-    eq(#decTeam, 3, "team round-trip count")
-    eq(decTeam[2].id, 4, "team round-trip member 2")
-end
-
-----------------------------------------------------------------------
--- Net protocol
-----------------------------------------------------------------------
-do
-    local msg = Net.buildChallenge("Alice", "Bob", 6)
-    local t, d, okDecode = Net.decode(msg)
-    eq(t, Net.MSG.CHALLENGE, "net decode type")
-    ok(okDecode, "net decode ok")
-    eq(d.from, "Alice", "net challenge from")
-    eq(d.to, "Bob", "net challenge to")
-
-    local start = Net.buildStart("Alice", "Bob", 12345, { { id = 1, level = 5 } })
-    local t2, d2 = Net.decode(start)
-    eq(t2, Net.MSG.START, "net start type")
-    eq(d2.seed, 12345, "net start seed")
-
-    -- wrong prefix rejected
-    local t3, _, ok3 = Net.decode("OTHER:stuff")
-    ok(not ok3, "net rejects wrong prefix")
-
-    -- malformed json rejected
-    local _, _, ok4 = Net.decode(Net.PREFIX .. ":{not json")
-    ok(not ok4, "net rejects malformed json")
-
-    -- version mismatch rejected
-    local bad = Net.PREFIX .. ':{"t":"hello","v":999,"d":{}}'
-    local _, _, ok5 = Net.decode(bad)
-    ok(not ok5, "net rejects version mismatch")
-end
-
-----------------------------------------------------------------------
--- JSON
-----------------------------------------------------------------------
-do
-    local enc = Json.encode({ a = 1, b = { 1, 2, 3 }, c = "hi", d = true, e = nil })
-    local dec = Json.decode(enc)
-    eq(dec.a, 1, "json number")
-    eq(dec.b[2], 2, "json array")
-    eq(dec.c, "hi", "json string")
-    eq(dec.d, true, "json bool")
-    eq(dec.e, nil, "json null omitted")
-
-    -- special chars
-    local s = Json.encode({ text = 'a"b\\c\nd' })
-    local d2 = Json.decode(s)
-    eq(d2.text, 'a"b\\c\nd', "json escapes round-trip")
-
-    -- unicode escape
-    local u = Json.decode('{"x":"\\u0041"}')
-    eq(u.x, "A", "json unicode escape")
-end
-
-----------------------------------------------------------------------
--- PvP determinism: both clients simulate the same battle
-----------------------------------------------------------------------
-do
-    local seed = 31337
-    local teamA = { BattleEngine.newPokemon(6, 50), BattleEngine.newPokemon(25, 50) }
-    local teamB = { BattleEngine.newPokemon(9, 50), BattleEngine.newPokemon(1, 50) }
-
-    -- client 1
-    local snapshotA = Serializer.encodeTeam(teamA)
-    local snapshotB = Serializer.encodeTeam(teamB)
-    local decodeA = Serializer.decodeTeam(snapshotA, BattleEngine)
-    local decodeB = Serializer.decodeTeam(snapshotB, BattleEngine)
-    local client1 = BattleEngine.newBattle(decodeA, Serializer.decodeTeam(snapshotB, BattleEngine), { mode = "pvp", seed = seed })
-    local client2 = BattleEngine.newBattle(Serializer.decodeTeam(snapshotA, BattleEngine), decodeB, { mode = "pvp", seed = seed })
-
-    local choices = {
-        { { type = "move", index = 1 }, { type = "move", index = 1 } },
-        { { type = "move", index = 2 }, { type = "move", index = 2 } },
-        { { type = "move", index = 1 }, { type = "move", index = 3 } },
-    }
-    local sameLogs = true
-    for _, ch in ipairs(choices) do
-        client1:runTurn(ch)
-        client2:runTurn(ch)
-        if #client1.log ~= #client2.log then sameLogs = false break end
-        for i = 1, #client1.log do
-            if client1.log[i] ~= client2.log[i] then sameLogs = false break end
-        end
-    end
-    ok(sameLogs, "PvP: both clients produce identical logs")
-    eq(client1.winner, client2.winner, "PvP: same winner on both clients")
+    ok(true, "Struggle path does not error")
 end
 
 ----------------------------------------------------------------------

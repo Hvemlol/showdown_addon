@@ -2,10 +2,11 @@ local TeamBuilder = {}
 
 local PokemonData = require("Core.Data.Pokemon")
 local BattleEngine = require("Core.BattleEngine")
+local Moves = require("Core.Data.Moves")
 local Stats = require("Core.Stats")
+local Serializer = require("Core.Util.Serializer")
 
 local frame
-local selectedIndex = 1
 local searchText = ""
 
 local function getTeam()
@@ -23,10 +24,6 @@ local function speciesList()
         if s then out[#out + 1] = s end
     end
     return out
-end
-
-local function createPokemonFromSpecies(species, level)
-    return BattleEngine.newPokemon(species.id, level or 5)
 end
 
 function TeamBuilder:Toggle()
@@ -49,7 +46,7 @@ end
 
 function TeamBuilder:Build()
     frame = CreateFrame("Frame", "ShowdownCloneTeamBuilder", UIParent, "BasicFrameTemplateWithInset")
-    frame:SetSize(720, 480)
+    frame:SetSize(760, 500)
     frame:SetPoint("CENTER")
     frame:SetMovable(true)
     frame:EnableMouse(true)
@@ -61,27 +58,36 @@ function TeamBuilder:Build()
     frame.title:SetPoint("TOPLEFT", frame.TitleBg, "TOPLEFT", 12, -8)
     frame.title:SetText("Showdown Clone - Team Builder")
 
-    -- Left: team list
+    -- Left: current team (6 slots)
     local teamFrame = CreateFrame("Frame", nil, frame, "InsetFrameTemplate3")
-    teamFrame:SetSize(300, 400)
+    teamFrame:SetSize(300, 420)
     teamFrame:SetPoint("TOPLEFT", 12, -32)
 
-    local teamScroll = CreateFrame("ScrollFrame", "ShowdownCloneTeamScroll", teamFrame, "UIPanelScrollFrameTemplate")
-    teamScroll:SetPoint("TOPLEFT", 4, -8)
-    teamScroll:SetPoint("BOTTOMRIGHT", -26, 6)
-    local teamContent = CreateFrame("Frame")
-    teamContent:SetSize(270, 400)
-    teamScroll:SetScrollChild(teamContent)
-    frame.teamContent = teamContent
-    frame.teamButtons = {}
+    frame.teamTitle = teamFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.teamTitle:SetPoint("TOP", 0, -8)
+    frame.teamTitle:SetText("Your Team (max 6)")
+
+    frame.teamSlots = {}
+    local y = -30
+    for i = 1, BattleEngine.MAX_TEAM do
+        local slot = CreateFrame("Button", nil, teamFrame, "UIPanelButtonTemplate")
+        slot:SetSize(270, 56)
+        slot:SetPoint("TOPLEFT", 8, y)
+        slot.slotIndex = i
+        slot:SetScript("OnClick", function(self)
+            TeamBuilder:EditSlot(self.slotIndex)
+        end)
+        frame.teamSlots[i] = slot
+        y = y - 60
+    end
 
     -- Right: species browser
     local browserFrame = CreateFrame("Frame", nil, frame, "InsetFrameTemplate3")
-    browserFrame:SetSize(380, 400)
+    browserFrame:SetSize(420, 420)
     browserFrame:SetPoint("TOPRIGHT", -12, -32)
 
     local searchBox = CreateFrame("EditBox", nil, browserFrame, "InputBoxTemplate")
-    searchBox:SetSize(200, 20)
+    searchBox:SetSize(260, 20)
     searchBox:SetPoint("TOPLEFT", 10, -10)
     searchBox:SetAutoFocus(false)
     searchBox:SetScript("OnTextChanged", function(self)
@@ -90,70 +96,59 @@ function TeamBuilder:Build()
     end)
     searchBox:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
 
-    local addButton = CreateFrame("Button", nil, browserFrame, "UIPanelButtonTemplate")
-    addButton:SetSize(80, 22)
-    addButton:SetPoint("LEFT", searchBox, "RIGHT", 8, 0)
-    addButton:SetText("Add")
-    addButton:SetScript("OnClick", function()
-        TeamBuilder:AddSelected()
-    end)
+    frame.levelBox = CreateFrame("EditBox", nil, browserFrame, "InputBoxTemplate")
+    frame.levelBox:SetSize(50, 20)
+    frame.levelBox:SetPoint("LEFT", searchBox, "RIGHT", 8, 0)
+    frame.levelBox:SetText("100")
+    frame.levelBox:SetAutoFocus(false)
 
-    local levelBox = CreateFrame("EditBox", nil, browserFrame, "InputBoxTemplate")
-    levelBox:SetSize(50, 20)
-    levelBox:SetPoint("LEFT", addButton, "RIGHT", 8, 0)
-    levelBox:SetText("5")
-    levelBox:SetAutoFocus(false)
-    frame.levelBox = levelBox
+    local levelLabel = browserFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    levelLabel:SetPoint("LEFT", frame.levelBox, "RIGHT", 4, 0)
+    levelLabel:SetText("level")
 
     local browserScroll = CreateFrame("ScrollFrame", "ShowdownCloneBrowserScroll", browserFrame, "UIPanelScrollFrameTemplate")
     browserScroll:SetPoint("TOPLEFT", 8, -40)
-    browserScroll:SetPoint("BOTTOMRIGHT", -26, 6)
+    browserScroll:SetPoint("BOTTOMRIGHT", -26, 40)
     local browserContent = CreateFrame("Frame")
-    browserContent:SetSize(350, 600)
+    browserContent:SetSize(390, 600)
     browserScroll:SetScrollChild(browserContent)
     frame.browserContent = browserContent
     frame.browserButtons = {}
 
-    -- Selected species tracking
+    -- Move picker row (bottom of browser)
+    frame.movePicker = CreateFrame("Frame", nil, browserFrame, "InsetFrameTemplate3")
+    frame.movePicker:SetSize(400, 32)
+    frame.movePicker:SetPoint("BOTTOMLEFT", 8, 6)
+    frame.moveButtons = {}
+    for i = 1, 4 do
+        local btn = CreateFrame("Button", nil, frame.movePicker, "UIPanelButtonTemplate")
+        btn:SetSize(92, 22)
+        btn:SetPoint("LEFT", 8 + (i - 1) * 98, 5)
+        btn:Hide()
+        frame.moveButtons[i] = btn
+    end
+
     frame.selectedSpeciesId = nil
+    frame.editingSlot = nil
 
     frame:Hide()
 end
 
 function TeamBuilder:Refresh()
     local team = getTeam()
-    local content = frame.teamContent
-    for _, btn in ipairs(frame.teamButtons) do btn:Hide() end
-    frame.teamButtons = {}
-    local y = -4
     for i = 1, BattleEngine.MAX_TEAM do
-        local slot = team[i]
-        local btn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
-        btn:SetSize(250, 40)
-        btn:SetPoint("TOPLEFT", 4, y)
-        if slot then
-            local p = slot -- serialized pokemon
-            local species = PokemonData.get(p.id)
-            btn:SetText("#" .. i .. " " .. (p.nickname or (species and species.name or "?")) .. " Lv" .. p.level)
-            btn:SetScript("OnClick", function()
-                selectedIndex = i
-                TeamBuilder:RemoveAt(i)
-            end)
-            btn:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                GameTooltip:SetText((p.nickname or (species and species.name or "?")))
-                GameTooltip:AddLine("Level " .. p.level, 1, 1, 1)
-                GameTooltip:AddLine("Click to remove from team", 0.8, 0.8, 0.8)
-                GameTooltip:Show()
-            end)
-            btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        local slot = frame.teamSlots[i]
+        local entry = team[i]
+        if entry then
+            local species = PokemonData.get(entry.id)
+            local name = entry.nickname or (species and species.name or "?")
+            local moves = entry.moves or {}
+            slot:SetText(string.format("#%d %s Lv%d\n    %s", i, name, entry.level, table.concat(moves, ", ")))
+            slot:SetNormalFontObject("GameFontNormalLeft")
         else
-            btn:SetText("#" .. i .. " (empty)")
-            btn:SetScript("OnClick", nil)
+            slot:SetText("#%d (empty)\n    click to add a Pokemon"):format(i)
+            slot:SetNormalFontObject("GameFontNormalLeft")
         end
-        btn:Show()
-        frame.teamButtons[#frame.teamButtons + 1] = btn
-        y = y - 44
     end
     TeamBuilder:RefreshBrowser()
 end
@@ -167,18 +162,16 @@ function TeamBuilder:RefreshBrowser()
     for _, species in ipairs(speciesList()) do
         if searchText == "" or species.name:lower():find(searchText, 1, true) then
             local btn = CreateFrame("Button", nil, content)
-            btn:SetSize(330, 22)
+            btn:SetSize(370, 22)
             btn:SetPoint("TOPLEFT", 4, y)
-            local typeStr = table.concat(species.types, "/")
-            btn:SetText(string.format("%03d %s (%s)", species.id, species.name, typeStr))
+            btn:SetText(string.format("%03d %s (%s)", species.id, species.name, table.concat(species.types, "/")))
             btn:SetNormalFontObject("GameFontNormalLeft")
             btn:SetHighlightFontObject("GameFontHighlightLeft")
             btn:SetScript("OnClick", function()
                 frame.selectedSpeciesId = species.id
-                for _, b in ipairs(frame.browserButtons) do
-                    b:UnlockHighlight()
-                end
+                for _, b in ipairs(frame.browserButtons) do b:UnlockHighlight() end
                 btn:LockHighlight()
+                TeamBuilder:RefreshMovePicker(species.id)
             end)
             btn:Show()
             frame.browserButtons[#frame.browserButtons + 1] = btn
@@ -190,45 +183,111 @@ function TeamBuilder:RefreshBrowser()
     content:SetHeight(math.max(400, count * 24 + 8))
 end
 
-function TeamBuilder:AddSelected()
-    local team = getTeam()
-    if #team >= BattleEngine.MAX_TEAM then
-        print("|cffff0000Showdown Clone:|r Your team is full (max 6).")
-        return
-    end
-    if not frame.selectedSpeciesId then
-        print("|cffff0000Showdown Clone:|r Select a Pokemon first.")
-        return
-    end
-    local level = tonumber(frame.levelBox:GetText()) or 5
+-- Show the legal moves for the selected species as 4 toggle buttons.
+function TeamBuilder:RefreshMovePicker(speciesId)
+    local level = tonumber(frame.levelBox:GetText()) or 100
     level = math.max(1, math.min(Stats.MAX_LEVEL, level))
-    local p = createPokemonFromSpecies(PokemonData.get(frame.selectedSpeciesId), level)
-    local Serializer = require("Core.Util.Serializer")
-    team[#team + 1] = Serializer.encodePokemon(p)
-    setTeam(team)
-    self:Refresh()
-end
-
-function TeamBuilder:RemoveAt(index)
-    local team = getTeam()
-    table.remove(team, index)
-    setTeam(team)
-    self:Refresh()
-end
-
--- Load team from saved variables into live Pokemon instances.
-function TeamBuilder:LoadLiveTeam()
-    local Serializer = require("Core.Util.Serializer")
-    local saved = getTeam()
-    local live = {}
-    for _, t in ipairs(saved) do
-        live[#live + 1] = Serializer.decodePokemon(t, BattleEngine)
+    local species = PokemonData.get(speciesId)
+    local legal = BattleEngine.legalMoves(species, level)
+    frame.selectedMoves = frame.selectedMoves or {}
+    -- keep only still-legal selections
+    local kept = {}
+    for _, id in ipairs(frame.selectedMoves) do
+        for _, l in ipairs(legal) do
+            if l == id then kept[#kept + 1] = id break end
+        end
     end
-    return live
+    frame.selectedMoves = kept
+    -- store legal list for the dropdown
+    frame.legalMoves = legal
+    for i = 1, 4 do
+        local btn = frame.moveButtons[i]
+        local sel = frame.selectedMoves[i]
+        if sel then
+            btn:SetText(sel)
+            btn:Show()
+        else
+            btn:SetText("(move " .. i .. ")")
+            btn:Show()
+        end
+        btn:SetScript("OnClick", function()
+            TeamBuilder:OpenMoveDropdown(i, legal)
+        end)
+    end
+end
+
+function TeamBuilder:OpenMoveDropdown(slotIndex, legal)
+    local menu = { { text = "Choose a move", isTitle = true, notCheckable = true } }
+    for _, id in ipairs(legal) do
+        local mv = Moves.get(id)
+        local label = id
+        if mv then
+            local cat = mv.cat or "physical"
+            label = string.format("%s (%s %d/%d)", id, cat, mv.power or 0, mv.acc or 100)
+        end
+        menu[#menu + 1] = {
+            text = label,
+            notCheckable = true,
+            func = function()
+                -- replace or append up to 4
+                frame.selectedMoves = frame.selectedMoves or {}
+                frame.selectedMoves[slotIndex] = id
+                -- trim trailing nils
+                while #frame.selectedMoves > 0 and not frame.selectedMoves[#frame.selectedMoves] do
+                    table.remove(frame.selectedMoves)
+                end
+                TeamBuilder:RefreshMovePicker(frame.selectedSpeciesId)
+            end,
+        }
+    end
+    if frame.selectedMoves and frame.selectedMoves[slotIndex] then
+        menu[#menu + 1] = { text = "---", notCheckable = true, disabled = true }
+        menu[#menu + 1] = {
+            text = "Remove this move",
+            notCheckable = true,
+            func = function()
+                frame.selectedMoves[slotIndex] = nil
+                while #frame.selectedMoves > 0 and not frame.selectedMoves[#frame.selectedMoves] do
+                    table.remove(frame.selectedMoves)
+                end
+                TeamBuilder:RefreshMovePicker(frame.selectedSpeciesId)
+            end,
+        }
+    end
+    menu[#menu + 1] = { text = "Cancel", notCheckable = true, func = function() end }
+    EasyMenu(menu, CreateFrame("Frame", "ShowdownCloneMoveMenu", UIParent, "UIDropDownMenuTemplate"), "cursor", 0, 0, "MENU")
+end
+
+-- Add the selected species (with chosen moves) to the editing slot.
+function TeamBuilder:EditSlot(slotIndex)
+    frame.editingSlot = slotIndex
+    if not frame.selectedSpeciesId then
+        print("|cffff0000Showdown:|r Select a Pokemon from the list first.")
+        return
+    end
+    local level = tonumber(frame.levelBox:GetText()) or 100
+    level = math.max(1, math.min(Stats.MAX_LEVEL, level))
+    local moves = frame.selectedMoves and #frame.selectedMoves > 0 and frame.selectedMoves or nil
+    local p = BattleEngine.newPokemon(frame.selectedSpeciesId, level, { moves = moves })
+    local team = getTeam()
+    team[slotIndex] = Serializer.encodePokemon(p)
+    -- compact (remove holes)
+    local compact = {}
+    for _, e in ipairs(team) do if e then compact[#compact + 1] = e end end
+    setTeam(compact)
+    self:Refresh()
+end
+
+function TeamBuilder:RemoveSlot(slotIndex)
+    local team = getTeam()
+    table.remove(team, slotIndex)
+    setTeam(team)
+    self:Refresh()
 end
 
 function TeamBuilder:GetLiveTeam()
-    return self:LoadLiveTeam()
+    local saved = getTeam()
+    return Serializer.decodeTeam(saved, BattleEngine)
 end
 
 _G["ShowdownClone_TeamBuilder"] = TeamBuilder

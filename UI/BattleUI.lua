@@ -6,7 +6,7 @@ local BattleEngine = require("Core.BattleEngine")
 local frame
 local currentBattle = nil
 local pendingChoice = nil
-local mode = nil -- "wild" | "trainer" | "pvp"
+local mode = nil -- "bot" | "pvp"
 local context = nil
 
 local function hpText(p)
@@ -77,6 +77,7 @@ function BattleUI:Build()
     logScroll:SetPoint("BOTTOMRIGHT", -26, 6)
     local logContent = CreateFrame("Frame")
     logContent:SetSize(250, 600)
+    logContent.height = 0
     logScroll:SetScrollChild(logContent)
     frame.logContent = logContent
     frame.logScroll = logScroll
@@ -95,24 +96,18 @@ function BattleUI:Build()
         frame.moveButtons[i] = btn
     end
 
-    -- Switch / Flee / Catch buttons
+    -- Switch + Forfeit buttons
     frame.switchBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
     frame.switchBtn:SetSize(90, 26)
     frame.switchBtn:SetPoint("TOPLEFT", 300, -290)
     frame.switchBtn:SetText("Switch")
     frame.switchBtn:SetScript("OnClick", function() BattleUI:ShowSwitchMenu() end)
 
-    frame.fleeBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    frame.fleeBtn:SetSize(90, 26)
-    frame.fleeBtn:SetPoint("LEFT", frame.switchBtn, "RIGHT", 8, 0)
-    frame.fleeBtn:SetText("Flee")
-    frame.fleeBtn:SetScript("OnClick", function() BattleUI:Flee() end)
-
-    frame.catchBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    frame.catchBtn:SetSize(90, 26)
-    frame.catchBtn:SetPoint("LEFT", frame.fleeBtn, "RIGHT", 8, 0)
-    frame.catchBtn:SetText("Catch!")
-    frame.catchBtn:SetScript("OnClick", function() BattleUI:Catch() end)
+    frame.forfeitBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    frame.forfeitBtn:SetSize(90, 26)
+    frame.forfeitBtn:SetPoint("LEFT", frame.switchBtn, "RIGHT", 8, 0)
+    frame.forfeitBtn:SetText("Forfeit")
+    frame.forfeitBtn:SetScript("OnClick", function() BattleUI:Forfeit() end)
 
     frame.statusText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     frame.statusText:SetPoint("BOTTOM", 0, 12)
@@ -133,27 +128,35 @@ function BattleUI:MakeHpBar(parent, point, x, y, width)
     return bar
 end
 
-local function appendLog(content, scroll, text, r, g, b)
+function BattleUI:AppendLog(msg)
+    if not frame then return end
+    local content = frame.logContent
     local fs = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    fs:SetPoint("TOPLEFT", content, "TOPLEFT", 4, content.height or 0)
+    fs:SetPoint("TOPLEFT", content, "TOPLEFT", 4, content.height)
     fs:SetWidth(240)
     fs:SetJustifyH("LEFT")
-    fs:SetText(text)
-    fs:SetTextColor(r or 1, g or 1, b or 1)
-    content.height = (content.height or 0) - 14
+    fs:SetText(msg)
+    content.height = content.height - 14
     content:SetHeight(math.abs(content.height) + 14)
-    scroll:UpdateScrollChildRect()
-    local max = scroll:GetVerticalScrollRange() or 0
-    scroll:SetVerticalScroll(max)
+    frame.logScroll:UpdateScrollChildRect()
+    frame.logScroll:SetVerticalScroll(frame.logScroll:GetVerticalScrollRange() or 0)
+end
+
+-- Determine which side the local player controls.
+function BattleUI:MySide()
+    if not currentBattle then return 1 end
+    if mode == "pvp" and ShowdownClone.state.pvp.activeDuel
+        and not ShowdownClone.state.pvp.activeDuel.isChallenger then
+        return 2
+    end
+    return 1
 end
 
 function BattleUI:Refresh()
     if not currentBattle then return end
     local b = currentBattle
-    local mySide = 1
-    local foeSide = 2
-    -- In PvP, "my side" depends on who started; for the local UI we always
-    -- show side 1 as the player if mode ~= pvp-as-foe.
+    local mySide = self:MySide()
+    local foeSide = b:opponentOf(mySide)
     local my = b:active(mySide)
     local foe = b:active(foeSide)
     if my then
@@ -170,45 +173,29 @@ function BattleUI:Refresh()
         frame.foeBar:SetValue(foe.hp)
         frame.foeBarText:SetText(hpText(foe))
     end
-    -- Move buttons
     for i = 1, 4 do
         local btn = frame.moveButtons[i]
         local slot = my and my.moves[i]
         if slot then
-            local mv = Moves.get(slot.id)
             btn:SetText(slot.id .. " (" .. slot.pp .. ")")
             btn:Enable()
-            btn:Show()
         else
             btn:SetText("--")
             btn:Disable()
         end
     end
-    -- Mode-specific buttons
-    if mode == "wild" then
-        frame.catchBtn:Show()
-        frame.fleeBtn:Show()
-        frame.switchBtn:Show()
-    elseif mode == "trainer" then
-        frame.catchBtn:Hide()
-        frame.fleeBtn:Hide()
-        frame.switchBtn:Show()
-    else
-        frame.catchBtn:Hide()
-        frame.fleeBtn:Hide()
-        frame.switchBtn:Show()
-    end
     if b.over then
-        local msg = b.winner == mySide and "You won!" or (b.fled and "Got away!" or "You lost!")
+        local msg
+        if b.winner == nil then msg = "Draw!"
+        elseif b.winner == mySide then msg = "You won!"
+        else msg = "You lost!" end
         frame.statusText:SetText(msg)
         for i = 1, 4 do frame.moveButtons[i]:Disable() end
+        frame.switchBtn:Disable()
     else
         frame.statusText:SetText(context.flavor or "Choose a move!")
+        frame.switchBtn:Enable()
     end
-end
-
-function BattleUI:AppendLog(msg)
-    appendLog(frame.logContent, frame.logScroll, msg)
 end
 
 function BattleUI:ChooseMove(index)
@@ -227,28 +214,21 @@ function BattleUI:ChooseSwitch(index)
     end
 end
 
-function BattleUI:Flee()
+function BattleUI:Forfeit()
     if not currentBattle or currentBattle.over then return end
-    pendingChoice = { type = "flee" }
+    pendingChoice = { type = "forfeit" }
     if ShowdownClone and ShowdownClone.OnPlayerChoice then
         ShowdownClone.OnPlayerChoice(pendingChoice)
     end
 end
 
-function BattleUI:Catch()
-    if ShowdownClone and ShowdownClone.OnCatchAttempt then
-        ShowdownClone.OnCatchAttempt()
-    end
-end
-
 function BattleUI:ShowSwitchMenu()
     if not currentBattle then return end
-    local team = currentBattle.sides[1].team
-    local menu = {
-        { text = "Switch Pokemon", isTitle = true, notCheckable = true },
-    }
+    local mySide = self:MySide()
+    local team = currentBattle.sides[mySide].team
+    local menu = { { text = "Switch Pokemon", isTitle = true, notCheckable = true } }
     for i, p in ipairs(team) do
-        if i ~= currentBattle.sides[1].active and not p.fainted then
+        if i ~= currentBattle.sides[mySide].active and not p.fainted then
             menu[#menu + 1] = {
                 text = p.name .. " Lv" .. p.level .. " (" .. hpText(p) .. ")",
                 notCheckable = true,

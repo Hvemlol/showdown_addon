@@ -1,37 +1,38 @@
 # Showdown Clone — WoW AddOn
 
 A simplified clone of the popular **Pokemon Showdown** browser game, built as a
-World of Warcraft AddOn. Features the original **151 Pokemon** (Gen 1), wild
-encounters while exploring, trainer battles, catching, leveling, EVs/IVs, and
-PvP duels against other players who have the addon.
+World of Warcraft AddOn. Like Showdown, the game is **teambuilding + battling**:
+you build a team of the original **151 Pokemon** (Gen 1), then battle practice
+bots or duel other players who have the addon. There is no catching, no
+leveling, no money — exactly like Showdown.
 
-## Features
+## The base principles (what this addon does)
 
-- All 151 original Pokemon with base stats, types, and learnsets (level-up moves).
-- Turn-based battle engine with the Gen 1 type chart, STAB, critical hits,
-  accuracy/evasion stages, and the classic Gen 1 move pool (simplified).
-- Wild encounters in outdoor zones (higher level Pokemon in harder zones),
-  with a shiny chance and a "run away" option.
-- Catching with Pokeballs (better balls = better catch rate).
-- Trainer battles: NPC-style trainers with themed teams, rewarding money and XP.
-- Leveling up to 100 with EXP, EVs, stat recalculation, and move learning.
-- PvP duels: challenge nearby players with the addon (`/showdown duel <name>`).
-  Battles are fully deterministic on both clients from a shared seed.
-- Team of up to 6 Pokemon, stored per character.
-- UI: minimap button, team builder, battle window, encounter popups.
+1. **Teambuilding** — pick up to 6 Pokemon, choose up to 4 legal moves for each
+   (moves the species can actually learn at that level), set a level (1–100).
+   Your team is saved per character.
+2. **Battling** — turn-based 6v6 combat. Each turn both sides choose a move or
+   a switch. First to KO all 6 opposing Pokemon wins. The engine implements
+   the Gen 1 damage formula, type chart, STAB, critical hits, accuracy/evasion
+   stages, status (burn/poison/paralysis/sleep/freeze/confusion), residual
+   damage, Struggle, and a 200-turn endurance cap.
+3. **Practice vs bots** — fight themed bot teams (Youngster → Champion Blue).
+   Bots use a simple "pick the highest-damage move" AI.
+4. **PvP duels** — challenge a nearby player with the addon
+   (`/showdown duel <name>`). Battles are **fully deterministic on both
+   clients** from a shared seed, so both sides always agree on the outcome.
 
 ## Slash commands
 
 | Command | Description |
 | --- | --- |
 | `/showdown` or `/showdown ui` | Open the team builder |
-| `/showdown battle` | Open the battle window |
-| `/showdown wild` | Force a wild encounter (outdoors) |
-| `/showdown trainer` | Challenge a random trainer |
+| `/showdown bot [n]` | Battle a practice bot (random, or bot #n) |
+| `/showdown bots` | List all practice bots |
 | `/showdown duel <player>` | Challenge a player to a PvP duel |
-| `/showdown accept` | Accept a pending duel challenge |
-| `/showdown decline` | Decline a pending duel challenge |
+| `/showdown accept` / `/showdown decline` | Respond to a duel challenge |
 | `/showdown team` | Print your team to chat |
+| `/showdown record` | Show your win/loss record |
 
 ## Project layout
 
@@ -43,17 +44,16 @@ Core/
   Data/Types.lua      Gen 1 type chart
   Data/Moves.lua      Move definitions (power, accuracy, pp, effect)
   Data/Pokemon.lua    All 151 Pokemon: stats, types, learnsets
-  Data/Trainers.lua   Trainer archetypes and themed teams
   Util/PRNG.lua       Deterministic RNG (mulberry32) for reproducible battles
-  Util/Serializer.lua Serialize/deserialize Pokemon instances
-  Stats.lua           Stat calculation, EXP/EV/IV math
-  BattleEngine.lua    Turn-based battle simulation (PvE + deterministic PvP)
-  Encounters.lua      Wild/trainer encounter generation, catching
+  Util/Serializer.lua Serialize/deserialize team members
+  Stats.lua           Stat calculation (Showdown-style, level-only)
+  BattleEngine.lua    Turn-based battle simulation (bot + deterministic PvP)
+  Bot.lua             Practice bot teams + simple move-choice AI
   Net.lua             Chat-channel based PvP protocol (addon messages)
 UI/
   MinimapButton.lua   Draggable minimap button
-  TeamBuilder.lua     Team management window
-  BattleUI.lua        Battle window: HP bars, move buttons, log
+  TeamBuilder.lua     Team builder: 6 slots, species browser, legal move picker
+  BattleUI.lua        Battle window: HP bars, move buttons, switch/forfeit, log
 tests/                Headless test runner (LuaJIT via lupa, or any Lua 5.1)
 ```
 
@@ -68,7 +68,7 @@ The engine has no WoW dependencies, so tests run under any Lua 5.1+ runtime.
 With Python + [lupa](https://pypi.org/project/lupa/) (LuaJIT):
 
 ```bash
-pip install lupa luaparser
+pip install lupa
 python3 tests/run_tests.py
 ```
 
@@ -94,7 +94,6 @@ both sides always agree on the outcome.
 - Gen 1 only (151 Pokemon), no abilities, no held items, no natures.
 - Simplified move effects: a curated subset of Gen 1 moves with straightforward
   damage / status / stat-stage effects. No complex volatile states.
-- No EV/IV influence in PvP (teams are normalized); EVs still matter for
-  your in-game progression.
-- Status moves and stat stages are simplified; no sleep/freeze RNG beyond the
-  shared deterministic PRNG.
+- No EV/IV investment; stats are a function of base stats and level only.
+- Status moves and stat stages are simplified; all RNG is deterministic from
+  the shared seed.

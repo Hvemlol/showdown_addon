@@ -1,8 +1,8 @@
 ## Interface: 11502
 ## Title: Showdown Clone
-## Notes: A simplified Pokemon Showdown clone inside World of Warcraft. Original 151 Pokemon, wild encounters, trainer battles, catching, leveling, and PvP duels.
+## Notes: A simplified Pokemon Showdown clone inside World of Warcraft. Original 151 Pokemon, team builder, practice battles vs bots, and PvP duels.
 ## Author: Hvemlol
-## Version: 0.1.0
+## Version: 0.2.0
 ## SavedVariables: ShowdownCloneDB
 ## DefaultState: enabled
 
@@ -11,13 +11,12 @@ Core\Libs\Json.lua
 Core\Data\Types.lua
 Core\Data\Moves.lua
 Core\Data\Pokemon.lua
-Core\Data\Trainers.lua
 
 Core\Util\PRNG.lua
 Core\Util\Serializer.lua
 Core\Stats.lua
 Core\BattleEngine.lua
-Core\Encounters.lua
+Core\Bot.lua
 Core\Net.lua
 
 UI\MinimapButton.lua

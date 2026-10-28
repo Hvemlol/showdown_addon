@@ -8,72 +8,58 @@ local Stats = require("Core.Stats")
 local PRNG = require("Core.Util.PRNG")
 
 BattleEngine.MAX_TEAM = 6
-BattleEngine.MAX_TURNS = 100 -- hard cap; prevents PP-stall infinite loops
+BattleEngine.MAX_TURNS = 200 -- hard cap; prevents PP-stall infinite loops
 BattleEngine.STRUGGLE = { id = "Struggle", type = "Normal", power = 50, acc = 100, pp = 1, effect = { recoil = 0.25 } }
 BattleEngine.STATUSES = { burn = true, poison = true, paralysis = true, sleep = true, freeze = true, confusion = true }
 
-local STAT_KEYS = { "atk", "def", "spa", "spd", "spe", "acc", "eva" }
 local function clampStage(s) return math.max(-6, math.min(6, s)) end
 
 -- Create a Pokemon instance ready for battle.
--- speciesId: number; level: number; opts: { ivs, evs, exp, moves, shiny, nickname }
--- opts.moves: optional list of { id, pp } (otherwise generated from learnset at level)
+-- speciesId: number; level: number (default 100); opts: { moves, nickname }
+-- opts.moves: list of move ids (up to 4). If omitted, the 4 most recent
+-- learnset moves at that level are used.
 function BattleEngine.newPokemon(speciesId, level, opts)
     opts = opts or {}
     local species = PokemonData.get(speciesId)
     if not species then error("BattleEngine.newPokemon: unknown species " .. tostring(speciesId), 2) end
-    level = math.max(1, math.min(Stats.MAX_LEVEL, math.floor(level or 1)))
-    local ivs = opts.ivs or {}
-    local evs = opts.evs or {}
-    local fullIvs = {
-        hp = ivs.hp or Stats.IV_MAX, atk = ivs.atk or Stats.IV_MAX,
-        def = ivs.def or Stats.IV_MAX, spa = ivs.spa or Stats.IV_MAX,
-        spd = ivs.spd or Stats.IV_MAX, spe = ivs.spe or Stats.IV_MAX,
-    }
-    local fullEvs = {
-        hp = evs.hp or 0, atk = evs.atk or 0, def = evs.def or 0,
-        spa = evs.spa or 0, spd = evs.spd or 0, spe = evs.spe or 0,
-    }
-    local stats = Stats.computeStats(species, level, fullIvs, fullEvs)
-    local currentHp = opts.hp
+    level = math.max(1, math.min(Stats.MAX_LEVEL, math.floor(level or 100)))
+    local stats = Stats.computeStats(species, level)
     local moves = {}
     if opts.moves then
-        for _, m in ipairs(opts.moves) do
-            local def = Moves.get(m.id)
+        for _, moveId in ipairs(opts.moves) do
+            local def = Moves.get(moveId)
             if def then
-                moves[#moves + 1] = { id = m.id, pp = m.pp or def.pp, maxPp = def.pp }
+                moves[#moves + 1] = { id = moveId, pp = def.pp, maxPp = def.pp }
             end
         end
     else
-        moves = BattleEngine.movesAtLevel(species, level)
+        moves = BattleEngine.defaultMoves(species, level)
     end
-    local p = {
+    if #moves == 0 then
+        moves[1] = { id = "Tackle", pp = 35, maxPp = 35 }
+    end
+    return {
         id = speciesId,
         species = species,
         name = opts.nickname or species.name,
         nickname = opts.nickname or species.name,
         level = level,
-        exp = opts.exp or 0,
-        ivs = fullIvs,
-        evs = fullEvs,
         stats = stats,
         maxHp = stats.hp,
-        hp = math.max(0, math.min(stats.hp, currentHp or stats.hp)),
+        hp = stats.hp,
         moves = moves,
         types = species.types,
         status = nil,
         stages = { atk = 0, def = 0, spa = 0, spd = 0, spe = 0, acc = 0, eva = 0 },
         volatile = {},
         fainted = false,
-        shiny = opts.shiny and true or false,
-        -- battle-only state
         lastDamageTaken = 0,
+        lastMoveType = nil,
     }
-    return p
 end
 
 -- The 4 most recent moves this species can know at the given level.
-function BattleEngine.movesAtLevel(species, level)
+function BattleEngine.defaultMoves(species, level)
     local known = {}
     for _, entry in ipairs(species.learnset) do
         local lv, moveId = entry[1], entry[2]
@@ -90,8 +76,17 @@ function BattleEngine.movesAtLevel(species, level)
         local def = Moves.get(picked[i])
         out[#out + 1] = { id = picked[i], pp = def.pp, maxPp = def.pp }
     end
-    if #out == 0 then
-        out[1] = { id = "Tackle", pp = 35, maxPp = 35 }
+    return out
+end
+
+-- All move ids this species can legally know at the given level.
+function BattleEngine.legalMoves(species, level)
+    local out = {}
+    for _, entry in ipairs(species.learnset) do
+        local lv, moveId = entry[1], entry[2]
+        if lv <= level and Moves.exists(moveId) then
+            out[#out + 1] = moveId
+        end
     end
     return out
 end
@@ -103,30 +98,26 @@ function BattleEngine.hasMove(p, moveId)
     return false
 end
 
-function BattleEngine.getMove(p, index)
-    return p.moves[index]
-end
-
--- Create a battle between two teams. mode: "pve" or "pvp".
--- opts.seed: PRNG seed (required for pvp; generated for pve)
+-- Create a battle between two teams. mode: "bot" or "pvp".
+-- opts.seed: PRNG seed (required for pvp; generated for bot)
 -- opts.onLog(msg): log callback
 function BattleEngine.newBattle(teamA, teamB, opts)
     opts = opts or {}
     local b = {
-        mode = opts.mode or "pve",
+        mode = opts.mode or "bot",
         rng = PRNG.new(opts.seed or PRNG.randomSeed()),
         seed = opts.seed,
         sides = {
-            { team = teamA, active = 1, name = opts.nameA or "Player" },
-            { team = teamB, active = 1, name = opts.nameB or "Foe" },
+            { team = teamA, active = 1, name = opts.nameA or "Player 1" },
+            { team = teamB, active = 1, name = opts.nameB or "Player 2" },
         },
         turn = 0,
         over = false,
-        winner = nil, -- 1 or 2
+        winner = nil, -- 1 or 2 (nil = draw)
         log = {},
         onLog = opts.onLog,
-        awaitingSwitch = {}, -- side indexes that must switch after a faint
-        fleeAttempted = false,
+        awaitingSwitch = {},
+        firstFaint = nil, -- side that lost its first Pokemon (for "lead" tracking)
     }
     return setmetatable(b, BattleEngine)
 end
@@ -145,23 +136,20 @@ function BattleEngine:opponentOf(side)
     return side == 1 and 2 or 1
 end
 
-function BattleEngine:isOver()
-    return self.over
-end
-
 -- Check win/loss; returns true if the battle ended.
 local function checkFaints(b)
-    local over = false
+    local sawFaint = false
     for side = 1, 2 do
         local p = b:active(side)
         if p and p.hp <= 0 and not p.fainted then
             p.fainted = true
             p.hp = 0
             b:logMsg(p.name .. " fainted!")
-            over = true
+            if not b.firstFaint then b.firstFaint = side end
+            sawFaint = true
         end
     end
-    if over then
+    if sawFaint then
         for side = 1, 2 do
             local alive = false
             for _, p in ipairs(b.sides[side].team) do
@@ -173,7 +161,6 @@ local function checkFaints(b)
                 b:logMsg(b.sides[b.winner].name .. " won the battle!")
                 return true
             end
-            -- mark that this side must switch
             local activeP = b:active(side)
             if activeP and activeP.fainted then
                 b.awaitingSwitch[side] = true
@@ -183,10 +170,10 @@ local function checkFaints(b)
     return b.over
 end
 
--- Force a switch for a side (used after faint, or by whirlwind).
 function BattleEngine:forceSwitch(side, newIndex)
     local s = self.sides[side]
-    if newIndex >= 1 and newIndex <= #s.team and not s.team[newIndex].fainted then
+    if newIndex >= 1 and newIndex <= #s.team and not s.team[newIndex].fainted
+        and newIndex ~= s.active then
         s.active = newIndex
         local p = s.team[newIndex]
         self:resetVolatile(p)
@@ -197,7 +184,7 @@ function BattleEngine:forceSwitch(side, newIndex)
     return false
 end
 
--- Player/AI chooses a switch after faint; returns true if switched.
+-- Auto-switch to the first non-fainted Pokemon (used when a side must switch).
 function BattleEngine:autoSwitch(side)
     local s = self.sides[side]
     for i, p in ipairs(s.team) do
@@ -214,12 +201,10 @@ function BattleEngine:resetVolatile(p)
     p.status = nil
 end
 
--- Speed comparison with paralysis quartering speed (Gen 1: 1/4).
 function BattleEngine:speedOf(p)
     local spe = p.stats.spe
     if p.status == "paralysis" then spe = math.floor(spe / 4) end
-    local stage = clampStage(p.stages.spe)
-    local mult = BattleEngine.stageMultiplier(stage)
+    local mult = self.stageMultiplier(clampStage(p.stages.spe))
     return math.max(1, math.floor(spe * mult))
 end
 
@@ -228,10 +213,8 @@ function BattleEngine.stageMultiplier(stage)
     return 2 / (2 - stage)
 end
 
-function BattleEngine:accuracyMultiplier(p)
-    local accStage = clampStage(p.stages.acc)
-    local evaStage = clampStage((self and self.opponentActive and self.opponentActive.stages.eva) or 0)
-    local combined = accStage - evaStage
+function BattleEngine:accuracyMultiplierOf(atk, def)
+    local combined = clampStage(atk.stages.acc) - clampStage(def.stages.eva)
     if combined >= 0 then return (3 + combined) / 3 end
     return 3 / (3 - combined)
 end
@@ -241,7 +224,6 @@ function BattleEngine:useMove(attackerSide, moveIndex, defenderSide)
     defenderSide = defenderSide or self:opponentOf(attackerSide)
     local atk = self:active(attackerSide)
     local def = self:active(defenderSide)
-    local side = self.sides[attackerSide]
     local result = { hit = false, damage = 0, ko = false, immune = false, missed = false }
 
     if self.over then return result end
@@ -250,17 +232,17 @@ function BattleEngine:useMove(attackerSide, moveIndex, defenderSide)
 
     local moveSlot = atk.moves[moveIndex]
     local move
-    if not moveSlot or moveSlot.pp <= 0 then
-        -- Struggle: no PP left on any move
-        local anyPp = false
+    if not moveSlot or moveSlot.pp <= 0 or moveSlot.disabled then
+        -- Struggle when no usable move remains
+        local anyUsable = false
         for _, m in ipairs(atk.moves) do
-            if m.pp > 0 and not m.disabled then anyPp = true break end
+            if m.pp > 0 and not m.disabled then anyUsable = true break end
         end
-        if not anyPp then
+        if not anyUsable then
             self:logMsg(atk.name .. " has no moves left! It used Struggle!")
             move = BattleEngine.STRUGGLE
         else
-            self:logMsg(atk.name .. " has no PP left for that move!")
+            self:logMsg(atk.name .. " can't use that move!")
             return result
         end
     else
@@ -318,7 +300,8 @@ function BattleEngine:useMove(attackerSide, moveIndex, defenderSide)
         return result
     end
 
-    self:logMsg(atk.name .. " used " .. moveSlot.id:gsub("(%d)$", "") .. "!")
+    self:logMsg(atk.name .. " used " .. (move.id or "Struggle") .. "!")
+    atk.lastMoveType = (move.cat or Types.categoryFor(move.type))
 
     -- Two-turn moves
     if move.twoTurn then
@@ -368,35 +351,37 @@ function BattleEngine:useMove(attackerSide, moveIndex, defenderSide)
     local damage = self:calcDamage(atk, def, move)
     result.hit = true
     result.damage = damage
-    def.hp = math.max(0, def.hp - damage)
-    def.lastDamageTaken = damage
-    atk.lastDamageTaken = 0
+    -- Substitute absorbs the hit
+    if def.volatile.substitute and damage > 0 then
+        def.volatile.substitute = def.volatile.substitute - damage
+        if def.volatile.substitute <= 0 then
+            def.volatile.substitute = nil
+            self:logMsg(def.name .. "'s substitute broke!")
+        else
+            self:logMsg(def.name .. "'s substitute took the hit! (" .. damage .. ")")
+        end
+        def.lastDamageTaken = 0
+    else
+        def.hp = math.max(0, def.hp - damage)
+        def.lastDamageTaken = damage
+    end
 
     local effText = ""
     if mult >= 2 then effText = " It's super effective!"
     elseif mult > 0 and mult < 1 then effText = " It's not very effective..." end
     self:logMsg("It dealt " .. damage .. " damage!" .. effText)
 
-    -- Critical hit
-    -- (handled inside calcDamage; re-derive via stored flag)
     if self._lastCrit then
         self:logMsg("A critical hit!")
     end
     self._lastCrit = nil
 
-    -- Move effects
     if move.effect then
         self:applyEffect(atk, def, move, damage, result)
     end
 
     if def.hp <= 0 then result.ko = true end
     return result
-end
-
-function BattleEngine:accuracyMultiplierOf(atk, def)
-    local combined = clampStage(atk.stages.acc) - clampStage(def.stages.eva)
-    if combined >= 0 then return (3 + combined) / 3 end
-    return 3 / (3 - combined)
 end
 
 -- Gen 1 damage formula (simplified):
@@ -413,7 +398,7 @@ function BattleEngine:calcDamage(atk, def, move)
     if move.fixed == "half" then return math.max(1, math.floor(def.hp / 2)) end
     if move.fixed == "counter" then
         local taken = def.lastDamageTaken or 0
-        if taken <= 0 or def.volatile.lastMoveType ~= "physical" then return 0 end
+        if taken <= 0 or def.lastMoveType ~= "physical" then return 0 end
         return taken * 2
     end
     if power <= 0 then return 0 end
@@ -423,32 +408,31 @@ function BattleEngine:calcDamage(atk, def, move)
     local a = isPhysical and atk.stats.atk or atk.stats.spa
     local d = isPhysical and def.stats.def or def.stats.spd
 
-    -- Stat stages
-    a = math.max(1, math.floor(a * self.stageMultiplier(atk.stages.atk or 0)))
-    d = math.max(1, math.floor(d * self.stageMultiplier(def.stages.def or 0)))
+    a = math.max(1, math.floor(a * self.stageMultiplier(clampStage(atk.stages.atk or 0))))
+    d = math.max(1, math.floor(d * self.stageMultiplier(clampStage(def.stages.def or 0))))
     if atk.status == "burn" and isPhysical then a = math.max(1, math.floor(a / 2)) end
+
+    -- Reflect / Light Screen halve damage on their respective category
+    if def.volatile.reflect and isPhysical then d = d * 2 end
+    if def.volatile.lightScreen and not isPhysical then d = d * 2 end
 
     local base = math.floor(math.floor(math.floor(2 * level / 5 + 2) * power * a / math.max(1, d)) / 50) + 2
 
-    -- STAB
     local stab = 1
     if atk.types[1] == move.type or atk.types[2] == move.type then stab = 1.5 end
 
-    -- Type effectiveness
     local eff = Types.getEffectivenessVs(move.type, def.types[1], def.types[2])
 
     -- Critical hit: Gen 1 uses base speed / 512 (highCrit doubles)
-    local critChance = (atk.stats.spe) / 512
+    local critChance = atk.stats.spe / 512
     if move.highCrit then critChance = critChance * 2 end
     if atk.volatile.focusEnergy then critChance = critChance * 4 end
     local crit = self.rng:chance(math.min(100, critChance * 100)) and 2 or 1
     if crit == 2 then self._lastCrit = true end
 
-    -- Random factor 217..255
     local rand = 217 + math.floor(self.rng:nextFloat() * 39)
 
     local damage = math.floor(base * stab * eff * crit * rand / 255)
-    -- Gen 1 minimum damage is 1 for a successful hit
     if damage < 1 then damage = 1 end
     return damage
 end
@@ -460,14 +444,10 @@ function BattleEngine:applyStatusMove(atk, def, move, result)
             self:logMsg("But it failed!")
             return
         end
-        -- Type immunities (simplified)
-        if eff.status == "sleep" or eff.status == "paralysis" then
-            if def.types[1] == "Ghost" or def.types[2] == "Ghost" then
-                if eff.status == "sleep" then
-                    self:logMsg("But it failed!")
-                    return
-                end
-            end
+        -- Ghosts can't be put to sleep (Gen 1)
+        if eff.status == "sleep" and (def.types[1] == "Ghost" or def.types[2] == "Ghost") then
+            self:logMsg("But it failed!")
+            return
         end
         def.status = eff.status
         if eff.status == "sleep" then
@@ -495,11 +475,7 @@ function BattleEngine:applyStatusMove(atk, def, move, result)
         local cur = target.stages[stat] or 0
         if (stages > 0 and cur < 6) or (stages < 0 and cur > -6) then
             target.stages[stat] = clampStage(cur + stages)
-            if target == atk then
-                self:logMsg(atk.name .. "'s " .. stat .. " " .. (stages > 0 and "rose" or "fell") .. "!")
-            else
-                self:logMsg(def.name .. "'s " .. stat .. " " .. (stages > 0 and "rose" or "fell") .. "!")
-            end
+            self:logMsg(target.name .. "'s " .. stat .. " " .. (stages > 0 and "rose" or "fell") .. "!")
         else
             self:logMsg("But it failed!")
         end
@@ -546,7 +522,7 @@ function BattleEngine:applyStatusMove(atk, def, move, result)
         end
     end
     if eff.leechSeed then
-        if def.volatile.leechSeed then
+        if def.volatile.leechSeed or def.types[1] == "Grass" or def.types[2] == "Grass" then
             self:logMsg("But it failed!")
             return
         end
@@ -566,16 +542,12 @@ function BattleEngine:applyStatusMove(atk, def, move, result)
     if eff.splash then
         self:logMsg("But nothing happened!")
     end
-    if eff.teleport then
-        self:logMsg(atk.name .. " fled from battle!")
-        result.flee = true
-    end
     if eff.whirlwind then
         result.forceSwitch = true
     end
     if eff.substitute then
         local cost = math.floor(atk.maxHp / 4)
-        if atk.hp <= cost then
+        if atk.hp <= cost or atk.volatile.substitute then
             self:logMsg("But it failed!")
             return
         end
@@ -589,7 +561,7 @@ function BattleEngine:applyStatusMove(atk, def, move, result)
         local picked = allMoves[self.rng:nextInt(1, #allMoves)]
         self:logMsg(atk.name .. " used Metronome and called " .. picked .. "!")
         local fake = Moves.get(picked)
-        if fake and (fake.cat ~= "status") then
+        if fake and (fake.cat or Types.categoryFor(fake.type)) ~= "status" then
             local mult = Types.getEffectivenessVs(fake.type, def.types[1], def.types[2])
             if mult > 0 then
                 local dmg = self:calcDamage(atk, def, fake)
@@ -611,7 +583,6 @@ function BattleEngine:applyEffect(atk, def, move, damage, result)
     local eff = move.effect
     if not eff then return end
 
-    -- Drain / Leech Seed handled after damage
     if eff.drain and damage > 0 then
         local heal = math.max(1, math.floor(damage * eff.drain))
         atk.hp = math.min(atk.maxHp, atk.hp + heal)
@@ -683,15 +654,27 @@ function BattleEngine:applyResidual()
 end
 
 -- Execute a full turn given choices for both sides.
--- choices: { [1] = {type="move", index=n} | {type="switch", index=n} | {type="flee"},
+-- choices: { [1] = {type="move", index=n} | {type="switch", index=n} | {type="forfeit"},
 --            [2] = ... }
 -- Returns true if the battle is over.
 function BattleEngine:runTurn(choices)
     if self.over then return true end
+
+    -- Forfeit
+    for side = 1, 2 do
+        local c = choices[side]
+        if c and c.type == "forfeit" then
+            self.over = true
+            self.winner = self:opponentOf(side)
+            self:logMsg(self.sides[side].name .. " forfeited! " .. self.sides[self.winner].name .. " won the battle!")
+            return true
+        end
+    end
+
     self.turn = self.turn + 1
     self:logMsg("--- Turn " .. self.turn .. " ---")
 
-    -- Hard turn cap: declare the side with more total HP the winner.
+    -- Hard turn cap: side with more total HP wins.
     if self.turn > BattleEngine.MAX_TURNS then
         local totalA, totalB = 0, 0
         for _, p in ipairs(self.sides[1].team) do totalA = totalA + p.hp end
@@ -699,74 +682,44 @@ function BattleEngine:runTurn(choices)
         self.over = true
         if totalA ~= totalB then
             self.winner = totalA > totalB and 1 or 2
-        else
-            self.winner = nil -- draw
         end
         self:logMsg("The battle went on too long! " ..
             (self.winner and (self.sides[self.winner].name .. " won by endurance!") or "It's a draw!"))
         return true
     end
 
-    -- Flee (PvE only)
+    -- Switches happen before moves
     for side = 1, 2 do
         local c = choices[side]
-        if c and c.type == "flee" and self.mode == "pve" then
-            local p = self:active(side)
-            local foe = self:active(self:opponentOf(side))
-            if self.mode == "pvp" then break end
-            local chance = math.floor(self:speedOf(p) * 32 / math.max(1, self:speedOf(foe)) + 30) % 256
-            if self:speedOf(p) >= self:speedOf(foe) or self.rng:chance(chance / 256 * 100) then
-                self:logMsg(self.sides[side].name .. " got away safely!")
-                self.over = true
-                self.winner = nil
-                self.fled = true
-                return true
-            else
-                self:logMsg("Can't escape!")
-            end
-        end
-    end
-
-    -- Switches happen before moves
-    local order = { 1, 2 }
-    for _, side in ipairs(order) do
-        local c = choices[side]
         if c and c.type == "switch" then
-            local s = self.sides[side]
-            if self:forceSwitch(side, c.index) then
-                -- switching clears pending faint-switch flag
-            else
+            if not self:forceSwitch(side, c.index) then
                 self:logMsg("Can't switch to that Pokemon!")
             end
         end
     end
 
-    -- Re-check after switches
     if checkFaints(self) then return true end
 
-    -- Build the action queue
+    -- Build the action queue (priority, then speed)
     local actions = {}
     for side = 1, 2 do
         local c = choices[side]
         local p = self:active(side)
-        if not c or c.type == "move" then
-            if p and not p.fainted then
-                local idx = (c and c.index) or 1
-                local priority = 0
-                local slot = p.moves[idx]
-                if slot then
-                    local mv = Moves.get(slot.id)
-                    priority = (mv and mv.priority) or 0
-                end
-                actions[#actions + 1] = { side = side, kind = "move", index = idx, priority = priority, speed = self:speedOf(p) }
+        if (not c or c.type == "move") and p and not p.fainted then
+            local idx = (c and c.index) or 1
+            local priority = 0
+            local slot = p.moves[idx]
+            if slot then
+                local mv = Moves.get(slot.id)
+                priority = (mv and mv.priority) or 0
             end
+            actions[#actions + 1] = { side = side, kind = "move", index = idx, priority = priority, speed = self:speedOf(p) }
         end
     end
-    -- Faster Pokemon (higher priority first) moves first
-    table.sort(actions, function(a, b2)
-        if a.priority ~= b2.priority then return a.priority > b2.priority end
-        if a.speed ~= b2.speed then return a.speed > b2.speed end
-        return a.side < b2.side
+    table.sort(actions, function(a, b)
+        if a.priority ~= b.priority then return a.priority > b.priority end
+        if a.speed ~= b.speed then return a.speed > b.speed end
+        return a.side < b.side
     end)
 
     for _, act in ipairs(actions) do
@@ -783,7 +736,7 @@ function BattleEngine:runTurn(choices)
         checkFaints(self)
     end
 
-    -- Auto-switch for sides whose active fainted (PvE: automatic; PvP: UI handles)
+    -- Auto-switch for sides whose active fainted
     if not self.over then
         for side = 1, 2 do
             if self.awaitingSwitch[side] then
@@ -794,81 +747,6 @@ function BattleEngine:runTurn(choices)
     end
 
     return self.over
-end
-
--- Run a turn where only one side acts (used when the player throws a ball:
--- the catch attempt consumes the player's action, so only the wild Pokemon moves).
-function BattleEngine:runFoeOnlyTurn(foeSide, foeChoice)
-    if self.over then return true end
-    self.turn = self.turn + 1
-    self:logMsg("--- Turn " .. self.turn .. " ---")
-    if self.turn > BattleEngine.MAX_TURNS then
-        self.over = true
-        self.winner = self:opponentOf(foeSide)
-        self:logMsg("The battle went on too long! " .. self.sides[self.winner].name .. " won by endurance!")
-        return true
-    end
-    local p = self:active(foeSide)
-    if p and not p.fainted then
-        self:useMove(foeSide, foeChoice.index or 1)
-    end
-    if checkFaints(self) then return true end
-    if not self.over then
-        self:applyResidual()
-        checkFaints(self)
-    end
-    if not self.over and self.awaitingSwitch[foeSide] then
-        self:autoSwitch(foeSide)
-        self.awaitingSwitch[foeSide] = nil
-    end
-    return self.over
-end
-
--- Compute EXP and money rewards for defeating a Pokemon (PvE).
--- Returns { exp = n, money = n }
-function BattleEngine.rewardsFor(defeated, victoriousLevel)
-    local b = defeated.species.base
-    local baseExp = math.floor((b.hp + b.atk + b.def + b.spa + b.spe) / 8) + defeated.level * 2
-    local exp = math.floor(baseExp * (defeated.shiny and 2 or 1))
-    local money = math.floor(defeated.level * (1 + (b.atk + b.def + b.spe) / 100))
-    return { exp = exp, money = money }
-end
-
--- Award EXP to a Pokemon; returns list of leveled-up milestones { from, to, newMoves }
-function BattleEngine.gainExp(p, amount)
-    if p.fainted then return {} end
-    p.exp = (p.exp or 0) + amount
-    local milestones = {}
-    while p.level < Stats.MAX_LEVEL do
-        local needed = Stats.expForLevel(p.level) - ((p.exp or 0) - Stats.totalExpForLevel(p.level))
-        if amount <= 0 then break end
-        local toNext = Stats.expForLevel(p.level)
-        local currentInLevel = (p.exp or 0) - Stats.totalExpForLevel(p.level)
-        if currentInLevel >= toNext then
-            local oldLevel = p.level
-            p.level = p.level + 1
-            -- recalc stats keeping current HP ratio
-            local ratio = p.maxHp > 0 and (p.hp / p.maxHp) or 1
-            p.stats = Stats.computeStats(p.species, p.level, p.ivs, p.evs)
-            p.maxHp = p.stats.hp
-            p.hp = math.max(1, math.floor(p.maxHp * ratio))
-            local newMoves = {}
-            for _, entry in ipairs(p.species.learnset) do
-                if entry[1] == p.level then newMoves[#newMoves + 1] = entry[2] end
-            end
-            -- auto-learn: replace first non-damaging/weakest slot if > 4 moves
-            for _, mvId in ipairs(newMoves) do
-                if #p.moves < 4 then
-                    local def = Moves.get(mvId)
-                    p.moves[#p.moves + 1] = { id = mvId, pp = def.pp, maxPp = def.pp }
-                end
-            end
-            milestones[#milestones + 1] = { from = oldLevel, to = p.level, newMoves = newMoves }
-        else
-            break
-        end
-    end
-    return milestones
 end
 
 return BattleEngine

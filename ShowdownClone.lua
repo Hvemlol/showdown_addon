@@ -3,10 +3,8 @@ ShowdownClone = ShowdownClone or {}
 local ADDON = "ShowdownClone"
 
 local BattleEngine = require("Core.BattleEngine")
-local Encounters = require("Core.Encounters")
 local PokemonData = require("Core.Data.Pokemon")
-local Moves = require("Core.Data.Moves")
-local Stats = require("Core.Stats")
+local Bot = require("Core.Bot")
 local PRNG = require("Core.Util.PRNG")
 local Serializer = require("Core.Util.Serializer")
 local Net = require("Core.Net")
@@ -25,15 +23,13 @@ ShowdownClone.eventFrame = eventFrame
 local state = {
     rng = nil,
     activeBattle = nil,       -- BattleEngine instance
-    battleMode = nil,         -- "wild" | "trainer" | "pvp"
-    battleContext = nil,      -- encounter/trainer/pvp info
+    battleMode = nil,         -- "bot" | "pvp"
+    battleContext = nil,      -- bot def or pvp info
     awaitingPlayerChoice = false,
     pvp = {
         pendingChallenge = nil, -- { from, to, teamSize }
         activeDuel = nil,       -- { opponent, seed, isChallenger, myChoice, foeChoice, turn }
     },
-    money = 0,
-    pokeballs = { pokeball = 20, greatball = 5, ultraball = 2, masterball = 0 },
 }
 ShowdownClone.state = state
 
@@ -47,16 +43,12 @@ function ShowdownClone:EnsureRng()
     return state.rng
 end
 
--- Saved variables bootstrap
 function ShowdownClone:OnInitialize()
     ShowdownCloneDB = ShowdownCloneDB or {}
     ShowdownCloneDB.team = ShowdownCloneDB.team or {}
     ShowdownCloneDB.settings = ShowdownCloneDB.settings or { minimapShown = true }
     ShowdownCloneDB.minimap = ShowdownCloneDB.minimap or { angle = 45 }
-    ShowdownCloneDB.pokeballs = ShowdownCloneDB.pokeballs or state.pokeballs
-    ShowdownCloneDB.money = ShowdownCloneDB.money or 0
-    state.pokeballs = ShowdownCloneDB.pokeballs
-    state.money = ShowdownCloneDB.money
+    ShowdownCloneDB.record = ShowdownCloneDB.record or { wins = 0, losses = 0 }
     state.rng = PRNG.new(PRNG.randomSeed())
 end
 
@@ -68,8 +60,6 @@ function ShowdownClone:OnEnable()
     eventFrame:RegisterEvent("ADDON_LOADED")
     eventFrame:RegisterEvent("PLAYER_LOGOUT")
     eventFrame:RegisterEvent("CHAT_MSG_ADDON")
-    eventFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
-    eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 
     RegisterAddonMessagePrefix(Net.PREFIX)
 
@@ -80,13 +70,7 @@ function ShowdownClone:OnEnable()
     end
 
     self:OnInitialize()
-    printMsg("Loaded. Type |cffffff00/showdown|r to open the team builder.")
-end
-
--- Persist on logout
-function ShowdownClone:OnLogout()
-    ShowdownCloneDB.pokeballs = state.pokeballs
-    ShowdownCloneDB.money = state.money
+    printMsg("Loaded. Type |cffffff00/showdown|r to build your team, |cffffff00/showdown bot|r to battle a bot, or |cffffff00/showdown duel <name>|r to PvP.")
 end
 
 eventFrame:SetScript("OnEvent", function(_, event, ...)
@@ -95,17 +79,14 @@ eventFrame:SetScript("OnEvent", function(_, event, ...)
         if name == ADDON then
             ShowdownClone:OnEnable()
         end
-    elseif event == "PLAYER_LOGOUT" then
-        ShowdownClone:OnLogout()
     elseif event == "CHAT_MSG_ADDON" then
-        local prefix, text, channel, sender = ...
+        local prefix, text, _, sender = ...
         if prefix == Net.PREFIX then
-            ShowdownClone:OnAddonMessage(sender, text, channel)
+            ShowdownClone:OnAddonMessage(sender, text)
         end
     end
 end)
 
--- Slash commands
 function ShowdownClone:SlashHandler(msg)
     local args = {}
     for word in (msg or ""):gmatch("%S+") do args[#args + 1] = word end
@@ -118,13 +99,11 @@ function ShowdownClone:SlashHandler(msg)
         else
             TeamBuilder:Show()
         end
-    elseif cmd == "battle" then
-        BattleUI:Build()
-        printMsg("Open a battle via /showdown wild or /showdown trainer.")
-    elseif cmd == "wild" then
-        self:StartWildEncounter()
-    elseif cmd == "trainer" then
-        self:StartTrainerBattle()
+    elseif cmd == "bot" then
+        local idx = tonumber(args[1])
+        self:StartBotBattle(idx)
+    elseif cmd == "bots" then
+        self:ListBots()
     elseif cmd == "duel" then
         local target = table.concat(args, " ")
         self:ChallengePlayer(target)
@@ -132,10 +111,9 @@ function ShowdownClone:SlashHandler(msg)
         self:AcceptChallenge()
     elseif cmd == "decline" then
         self:DeclineChallenge()
-    elseif cmd == "team" then
-        self:PrintTeam()
-    elseif cmd == "bag" or cmd == "balls" then
-        self:PrintBag()
+    elseif cmd == "record" then
+        local r = ShowdownCloneDB.record or { wins = 0, losses = 0 }
+        printMsg(string.format("Record: %d wins, %d losses", r.wins, r.losses))
     elseif cmd == "help" then
         self:PrintHelp()
     else
@@ -145,197 +123,114 @@ end
 
 function ShowdownClone:PrintHelp()
     printMsg("Commands:")
-    printMsg("/showdown ui - open team builder")
-    printMsg("/showdown wild - start a wild encounter")
-    printMsg("/showdown trainer - challenge a trainer")
+    printMsg("/showdown ui - open the team builder")
+    printMsg("/showdown bot [n] - battle a practice bot (list with /showdown bots)")
+    printMsg("/showdown bots - list practice bots")
     printMsg("/showdown duel <player> - PvP duel")
     printMsg("/showdown accept|decline - respond to a duel")
     printMsg("/showdown team - print your team")
-    printMsg("/showdown bag - print Pokeballs and money")
+    printMsg("/showdown record - show your win/loss record")
 end
 
 function ShowdownClone:PrintTeam()
-    local team = TeamBuilder:GetLiveTeam()
+    local team = self:GetLiveTeam()
     if #team == 0 then
         printMsg("Your team is empty. Open the team builder with /showdown ui.")
         return
     end
     printMsg("Your team:")
     for i, p in ipairs(team) do
-        printMsg(string.format("  %d. %s Lv%d (%d/%d HP)", i, p.name, p.level, p.hp, p.maxHp))
+        local moveIds = {}
+        for _, m in ipairs(p.moves) do moveIds[#moveIds + 1] = m.id end
+        printMsg(string.format("  %d. %s Lv%d - %s", i, p.name, p.level, table.concat(moveIds, ", ")))
     end
 end
 
-function ShowdownClone:PrintBag()
-    printMsg(string.format("Money: %dg", state.money))
-    for ball, count in pairs(state.pokeballs) do
-        printMsg(string.format("  %s: %d", ball, count))
-    end
-end
-
--- Live team accessor
+-- Live team accessor. A Showdown team is exactly what the builder saved.
 function ShowdownClone:GetLiveTeam()
-    local team = TeamBuilder:GetLiveTeam()
-    if #team == 0 then
-        -- auto-give a starter if empty
-        local starterId = state.rng:nextInt(1, 3) -- 1-3 = Bulbasaur/Charmander/Squirtle
-        local p = BattleEngine.newPokemon(starterId, 5)
-        ShowdownCloneDB.team = { Serializer.encodePokemon(p) }
-        printMsg("You received a starter Pokemon: " .. p.name .. "!")
-        return { p }
+    local saved = ShowdownCloneDB.team or {}
+    if #saved == 0 then
+        -- give a default starter team so a new player can battle immediately
+        saved = {
+            Serializer.encodePokemon(BattleEngine.newPokemon(1, 100)),
+            Serializer.encodePokemon(BattleEngine.newPokemon(4, 100)),
+            Serializer.encodePokemon(BattleEngine.newPokemon(7, 100)),
+        }
+        ShowdownCloneDB.team = saved
+        printMsg("You received a default team (Bulbasaur, Charmander, Squirtle). Customize it with /showdown ui.")
     end
-    return team
+    return Serializer.decodeTeam(saved, BattleEngine)
 end
 
 function ShowdownClone:SaveTeam(team)
-    local saved = {}
-    for i, p in ipairs(team) do
-        saved[i] = Serializer.encodePokemon(p)
+    ShowdownCloneDB.team = Serializer.encodeTeam(team)
+end
+
+-- List practice bots
+function ShowdownClone:ListBots()
+    printMsg("Practice bots:")
+    for i, def in ipairs(Bot.TEAMS) do
+        printMsg(string.format("  %d. %s - %s (%d Pokemon)", i, def.name, def.flavor, #def.team))
     end
-    ShowdownCloneDB.team = saved
+    printMsg("Battle one with: /showdown bot <number>")
 end
 
--- Wild encounter
-function ShowdownClone:StartWildEncounter()
+-- Bot battle (practice)
+function ShowdownClone:StartBotBattle(index)
     local team = self:GetLiveTeam()
-    local mapId = C_Map and C_Map.GetBestMapForUnit and C_Map.GetBestMapForUnit("player")
-    local zoneType = Encounters.zoneForInstance(mapId)
-    local playerLevel = self:AverageTeamLevel(team)
-    local enc = Encounters.generateWild(state.rng, zoneType, playerLevel)
-    local wild = enc.pokemon
-    printMsg("A wild " .. wild.name .. " (Lv" .. wild.level .. (wild.shiny and " SHINY!" or "") .. ") appeared!")
+    if #team == 0 then
+        printMsg("You need a team first! Open the team builder with /showdown ui.")
+        return
+    end
+    local idx, def
+    if index then
+        idx = index
+        def = Bot.get(index)
+    else
+        idx, def = Bot.random(state.rng, state.battleContext and state.battleContext.botIndex)
+    end
+    printMsg(def.name .. " challenges you! \"" .. def.flavor .. "\"")
+    local botTeam = Bot.buildTeam(def)
     local seed = state.rng:nextInt(1, 4294967295)
-    local battle = BattleEngine.newBattle(team, { wild }, {
-        mode = "pve",
+    local battle = BattleEngine.newBattle(team, botTeam, {
+        mode = "bot",
         seed = seed,
         nameA = UnitName("player"),
-        nameB = "Wild " .. wild.name,
-        onLog = function(msg) BattleUI:AppendLog(msg) end,
+        nameB = def.name,
+        onLog = function(m) BattleUI:AppendLog(m) end,
     })
     state.activeBattle = battle
-    state.battleMode = "wild"
-    state.battleContext = { encounter = enc, zone = zoneType }
+    state.battleMode = "bot"
+    state.battleContext = { bot = def, botIndex = idx }
     state.awaitingPlayerChoice = true
-    BattleUI:Open(battle, "wild", { flavor = "A wild " .. wild.name .. " appeared!" })
+    BattleUI:Open(battle, "bot", { flavor = def.name .. " wants to battle!" })
 end
 
--- Trainer battle
-function ShowdownClone:StartTrainerBattle()
-    local team = self:GetLiveTeam()
-    local playerLevel = self:AverageTeamLevel(team)
-    local scale = 0.6 + (playerLevel / Stats.MAX_LEVEL) * 0.8
-    local gen = Encounters.generateTrainer(state.rng, scale)
-    printMsg("Trainer " .. gen.trainer.name .. " challenges you! \"" .. gen.trainer.flavor .. "\"")
-    local seed = state.rng:nextInt(1, 4294967295)
-    local battle = BattleEngine.newBattle(team, gen.team, {
-        mode = "pve",
-        seed = seed,
-        nameA = UnitName("player"),
-        nameB = gen.trainer.name,
-        onLog = function(msg) BattleUI:AppendLog(msg) end,
-    })
-    state.activeBattle = battle
-    state.battleMode = "trainer"
-    state.battleContext = { trainer = gen.trainer }
-    state.awaitingPlayerChoice = true
-    BattleUI:Open(battle, "trainer", { flavor = gen.trainer.name .. " wants to battle!" })
-end
-
-function ShowdownClone:AverageTeamLevel(team)
-    if #team == 0 then return 5 end
-    local sum = 0
-    for _, p in ipairs(team) do sum = sum + p.level end
-    return math.floor(sum / #team)
-end
-
--- Player chose an action (move/switch/flee)
+-- Player chose an action (move/switch/forfeit)
 function ShowdownClone.OnPlayerChoice(choice)
     local b = state.activeBattle
     if not b or b.over then return end
+
+    if state.battleMode == "pvp" and state.pvp.activeDuel then
+        local duel = state.pvp.activeDuel
+        duel.myChoice = choice
+        local msg = Net.buildChoice(UnitName("player"), duel.opponent, duel.turn, choice)
+        ShowdownClone:SendAddonMessage(msg, duel.opponent)
+        BattleUI:AppendLog("Waiting for " .. duel.opponent .. "...")
+        state.awaitingPlayerChoice = false
+        ShowdownClone:MaybeRunPvpTurn()
+        return
+    end
+
+    -- bot mode: player choice vs bot choice
     state.awaitingPlayerChoice = false
-
-    if choice.type == "flee" then
-        local over = b:runTurn({ [1] = choice })
-        BattleUI:Refresh()
-        if over then
-            ShowdownClone:OnBattleEnd(b)
-        else
-            state.awaitingPlayerChoice = true
-            ShowdownClone:RunAiTurn()
-        end
-        return
-    end
-
-    -- PvE: player choice vs AI choice
-    local aiChoice = Encounters.aiChooseMove(b, 2)
-    local over = b:runTurn({ [1] = choice, [2] = aiChoice })
+    local botChoice = Bot.chooseMove(b, 2)
+    local over = b:runTurn({ [1] = choice, [2] = botChoice })
     BattleUI:Refresh()
     if over then
         ShowdownClone:OnBattleEnd(b)
     else
-        -- check for switch need
         state.awaitingPlayerChoice = true
-    end
-end
-
-function ShowdownClone:RunAiTurn()
-    -- called when player fled but battle continues; AI acts alone
-    local b = state.activeBattle
-    if not b or b.over then return end
-    local aiChoice = Encounters.aiChooseMove(b, 2)
-    local over = b:runTurn({ [2] = aiChoice })
-    BattleUI:Refresh()
-    if over then
-        ShowdownClone:OnBattleEnd(b)
-    end
-end
-
--- Catch attempt (wild battles only)
-function ShowdownClone.OnCatchAttempt()
-    local b = state.activeBattle
-    if not b or state.battleMode ~= "wild" then return end
-    local wild = b:active(2)
-    local ball = "pokeball"
-    if state.pokeballs.ultraball > 0 then ball = "ultraball"
-    elseif state.pokeballs.greatball > 0 then ball = "greatball" end
-    if state.pokeballs.masterball > 0 and wild.shiny then ball = "masterball" end
-    if (state.pokeballs[ball] or 0) <= 0 then
-        printMsg("You have no " .. ball .. "s left!")
-        return
-    end
-    state.pokeballs[ball] = state.pokeballs[ball] - 1
-    local result = Encounters.attemptCatch(state.rng, wild, ball, ShowdownClone:AverageTeamLevel(TeamBuilder:GetLiveTeam()))
-    BattleUI:AppendLog("You threw a " .. ball .. "! (chance " .. math.floor(result.chance * 100) .. "%)")
-    for i = 1, result.shakes do
-        BattleUI:AppendLog("...shake " .. i)
-    end
-    if result.success then
-        BattleUI:AppendLog("Gotcha! " .. wild.name .. " was caught!")
-        -- add to team
-        local team = TeamBuilder:GetLiveTeam()
-        if #team < BattleEngine.MAX_TEAM then
-            team[#team + 1] = wild
-            self:SaveTeam(team)
-            printMsg(wild.name .. " joined your team!")
-        else
-            printMsg(wild.name .. " was caught, but your team is full. It was released.")
-        end
-        b.over = true
-        b.winner = 1
-        b.caught = true
-        BattleUI:Refresh()
-        ShowdownClone:OnBattleEnd(b)
-    else
-        BattleUI:AppendLog("Oh no! " .. wild.name .. " broke free!")
-        -- the throw consumed the player's turn: only the wild Pokemon acts
-        local aiChoice = Encounters.aiChooseMove(b, 2)
-        local over = b:runFoeOnlyTurn(2, aiChoice)
-        BattleUI:Refresh()
-        if over then
-            ShowdownClone:OnBattleEnd(b)
-        else
-            state.awaitingPlayerChoice = true
-        end
     end
 end
 
@@ -343,66 +238,16 @@ function ShowdownClone:OnBattleEnd(b)
     state.activeBattle = nil
     state.awaitingPlayerChoice = false
     BattleUI:Refresh()
-    if b.winner == 1 and not b.caught then
-        self:OnBattleWon(b)
-    elseif b.winner == 2 then
-        printMsg("You blacked out! Your Pokemon were healed at the Pokemon Center.")
-        self:HealTeam()
+    local mySide = (state.battleMode == "pvp" and state.pvp.activeDuel and not state.pvp.activeDuel.isChallenger) and 2 or 1
+    if b.winner == mySide then
+        ShowdownCloneDB.record.wins = (ShowdownCloneDB.record.wins or 0) + 1
+        printMsg("You won! Record: " .. ShowdownCloneDB.record.wins .. "W / " .. (ShowdownCloneDB.record.losses or 0) .. "L")
+    elseif b.winner ~= nil then
+        ShowdownCloneDB.record.losses = (ShowdownCloneDB.record.losses or 0) + 1
+        printMsg("You lost. Record: " .. (ShowdownCloneDB.record.wins or 0) .. "W / " .. ShowdownCloneDB.record.losses .. "L")
+    else
+        printMsg("The battle was a draw.")
     end
-end
-
-function ShowdownClone:OnBattleWon(b)
-    local ctx = state.battleContext or {}
-    if state.battleMode == "wild" then
-        local wild = b.sides[2].team[1]
-        if wild and not wild.fainted then return end -- escaped/caught handled elsewhere
-        local rewards = BattleEngine.rewardsFor(wild, 0)
-        local team = TeamBuilder:GetLiveTeam()
-        local leveled = {}
-        for _, p in ipairs(team) do
-            if not p.fainted then
-                local ms = BattleEngine.gainExp(p, rewards.exp)
-                for _, m in ipairs(ms) do
-                    leveled[#leveled + 1] = p.name .. " grew to Lv" .. m.to .. "!"
-                    for _, mv in ipairs(m.newMoves) do
-                        leveled[#leveled + 1] = p.name .. " learned " .. mv .. "!"
-                    end
-                end
-            end
-        end
-        self:SaveTeam(team)
-        for _, line in ipairs(leveled) do printMsg(line) end
-        printMsg("Gained " .. rewards.exp .. " EXP and " .. rewards.money .. " money!")
-        state.money = state.money + rewards.money
-    elseif state.battleMode == "trainer" then
-        local trainer = ctx.trainer
-        local team = TeamBuilder:GetLiveTeam()
-        for _, p in ipairs(team) do
-            if not p.fainted then
-                BattleEngine.gainExp(p, math.floor(trainer.team[1].level * 30))
-            end
-        end
-        self:SaveTeam(team)
-        local reward = trainer.money * math.max(1, math.floor(self:AverageTeamLevel(team) / 10))
-        state.money = state.money + reward
-        printMsg("You defeated " .. trainer.name .. "! Won " .. reward .. " money.")
-        -- Pokeball loot
-        local loot = state.rng:nextInt(1, 3)
-        state.pokeballs.pokeball = (state.pokeballs.pokeball or 0) + loot
-        printMsg("Found " .. loot .. " Pokeballs!")
-    end
-end
-
-function ShowdownClone:HealTeam()
-    local team = TeamBuilder:GetLiveTeam()
-    for _, p in ipairs(team) do
-        p.hp = p.maxHp
-        p.status = nil
-        p.fainted = false
-        p.stages = { atk = 0, def = 0, spa = 0, spd = 0, spe = 0, acc = 0, eva = 0 }
-        p.volatile = {}
-    end
-    self:SaveTeam(team)
 end
 
 -- PvP
@@ -459,9 +304,8 @@ function ShowdownClone:StartDuelAsChallenger(opponentName)
     local snapshot = Serializer.encodeTeam(team)
     local msg = Net.buildStart(UnitName("player"), opponentName, seed, snapshot)
     self:SendAddonMessage(msg, opponentName)
-    local liveTeam = TeamBuilder:GetLiveTeam()
     local opponentTeam = Serializer.decodeTeam(snapshot, BattleEngine)
-    local battle = BattleEngine.newBattle(liveTeam, opponentTeam, {
+    local battle = BattleEngine.newBattle(team, opponentTeam, {
         mode = "pvp",
         seed = seed,
         nameA = UnitName("player"),
@@ -472,12 +316,8 @@ function ShowdownClone:StartDuelAsChallenger(opponentName)
     state.battleMode = "pvp"
     state.battleContext = { opponent = opponentName }
     state.pvp.activeDuel = {
-        opponent = opponentName,
-        seed = seed,
-        isChallenger = true,
-        myChoice = nil,
-        foeChoice = nil,
-        turn = 0,
+        opponent = opponentName, seed = seed, isChallenger = true,
+        myChoice = nil, foeChoice = nil, turn = 0,
     }
     state.awaitingPlayerChoice = true
     BattleUI:Open(battle, "pvp", { flavor = "PvP duel vs " .. opponentName })
@@ -486,8 +326,8 @@ end
 
 function ShowdownClone:StartDuelAsOpponent(challengerName, seed, foeSnapshot)
     local opponentTeam = Serializer.decodeTeam(foeSnapshot, BattleEngine)
-    local myTeam = TeamBuilder:GetLiveTeam()
-    -- Opponent (challenger) is side 1, we are side 2
+    local myTeam = self:GetLiveTeam()
+    -- Challenger is side 1, we are side 2
     local battle = BattleEngine.newBattle(opponentTeam, myTeam, {
         mode = "pvp",
         seed = seed,
@@ -499,19 +339,15 @@ function ShowdownClone:StartDuelAsOpponent(challengerName, seed, foeSnapshot)
     state.battleMode = "pvp"
     state.battleContext = { opponent = challengerName }
     state.pvp.activeDuel = {
-        opponent = challengerName,
-        seed = seed,
-        isChallenger = false,
-        myChoice = nil,
-        foeChoice = nil,
-        turn = 0,
+        opponent = challengerName, seed = seed, isChallenger = false,
+        myChoice = nil, foeChoice = nil, turn = 0,
     }
     state.awaitingPlayerChoice = true
     BattleUI:Open(battle, "pvp", { flavor = "PvP duel vs " .. challengerName })
     printMsg("Duel started vs " .. challengerName .. "!")
 end
 
-function ShowdownClone:OnAddonMessage(sender, text, channel)
+function ShowdownClone:OnAddonMessage(sender, text)
     local msgType, data, ok = Net.decode(text)
     if not ok then return end
     local myName = UnitName("player")
@@ -524,12 +360,9 @@ function ShowdownClone:OnAddonMessage(sender, text, channel)
         if not data.accepted then
             printMsg(data.from .. " declined your duel.")
             state.pvp.pendingChallenge = nil
-        else
-            -- accepted: challenger starts the duel
-            if state.pvp.pendingChallenge and state.pvp.pendingChallenge.to:lower() == sender:lower() then
-                self:StartDuelAsChallenger(sender)
-                state.pvp.pendingChallenge = nil
-            end
+        elseif state.pvp.pendingChallenge and state.pvp.pendingChallenge.to:lower() == sender:lower() then
+            self:StartDuelAsChallenger(sender)
+            state.pvp.pendingChallenge = nil
         end
     elseif msgType == Net.MSG.START then
         self:StartDuelAsOpponent(data.from, data.seed, data.team)
@@ -541,37 +374,19 @@ function ShowdownClone:OnAddonMessage(sender, text, channel)
             state.activeBattle.over = true
             state.activeBattle.winner = 2
             BattleUI:Refresh()
+            self:OnBattleEnd(state.activeBattle)
         end
         state.pvp.activeDuel = nil
         state.activeBattle = nil
-    elseif msgType == Net.MSG.RESULT then
-        -- verification echo
     end
 end
 
 function ShowdownClone:SendAddonMessage(msg, target)
-    -- Prefer whisper channel for targeted duels; fall back to party/raid.
     if target and target ~= "" then
         SendAddonMessage(Net.PREFIX, msg, "WHISPER", target)
     else
         SendAddonMessage(Net.PREFIX, msg, "PARTY")
     end
-end
-
--- PvP turn flow: when the player makes a choice, send it and wait for foe's.
-local origOnPlayerChoice = ShowdownClone.OnPlayerChoice
-function ShowdownClone.OnPlayerChoice(choice)
-    if state.battleMode == "pvp" and state.pvp.activeDuel then
-        local duel = state.pvp.activeDuel
-        duel.myChoice = choice
-        local msg = Net.buildChoice(UnitName("player"), duel.opponent, duel.turn, choice)
-        ShowdownClone:SendAddonMessage(msg, duel.opponent)
-        BattleUI:AppendLog("Waiting for " .. duel.opponent .. "...")
-        state.awaitingPlayerChoice = false
-        ShowdownClone:MaybeRunPvpTurn()
-        return
-    end
-    origOnPlayerChoice(choice)
 end
 
 function ShowdownClone:OnFoeChoice(data)
@@ -587,7 +402,6 @@ function ShowdownClone:MaybeRunPvpTurn()
     local b = state.activeBattle
     if not duel or not b or b.over then return end
     if not duel.myChoice or not duel.foeChoice then return end
-    -- side 1 = challenger, side 2 = us (if we are the opponent)
     local mySide = duel.isChallenger and 1 or 2
     local foeSide = duel.isChallenger and 2 or 1
     local choices = {}
@@ -605,12 +419,12 @@ function ShowdownClone:MaybeRunPvpTurn()
         printMsg(winnerName and (winnerName .. " won the duel!") or "The duel ended in a draw!")
         state.pvp.activeDuel = nil
         state.activeBattle = nil
+        self:OnBattleEnd(b)
     else
         state.awaitingPlayerChoice = true
     end
 end
 
--- Expose for UI
 function ShowdownClone.ToggleTeamBuilder()
     TeamBuilder:Toggle()
 end
