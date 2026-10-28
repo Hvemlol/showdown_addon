@@ -853,11 +853,20 @@ do
     ok(stats1.spa < stats100.spa, "Level 1 SpA < Level 100 SpA")
 
     local bulbasaur = PokemonData.get(1)
-    local expectedHp100 = math.floor((2 * 45 + 31) * 100 / 100) + 100 + 10
+    -- Gen 1 max IV/EV formula: HP = floor((2*base+93)*L/100)+L+10, others = floor((2*base+93)*L/100)+5
+    local expectedHp100 = math.floor((2 * 45 + 93) * 100 / 100) + 100 + 10
     eq(Stats.computeStats(bulbasaur, 100).hp, expectedHp100, "Bulbasaur L100 HP formula")
+    eq(expectedHp100, 293, "Bulbasaur L100 HP canonical value (2*45+203)")
 
-    local expectedAtk100 = math.floor((2 * 49 + 31) * 100 / 100) + 5
+    local expectedAtk100 = math.floor((2 * 49 + 93) * 100 / 100) + 5
     eq(Stats.computeStats(bulbasaur, 100).atk, expectedAtk100, "Bulbasaur L100 Atk formula")
+    eq(expectedAtk100, 196, "Bulbasaur L100 Atk canonical value (2*49+98)")
+
+    -- Mewtwo L100 canonical values
+    local mewtwoSpA = Stats.computeStats(mewtwo, 100).spa
+    eq(mewtwoSpA, 406, "Mewtwo L100 SpA canonical value (2*154+98)")
+    local mewtwoHp = Stats.computeStats(mewtwo, 100).hp
+    eq(mewtwoHp, 415, "Mewtwo L100 HP canonical value (2*106+203)")
 
     local prevHp = 0
     for lv = 1, 100 do
@@ -1105,36 +1114,509 @@ do
     local def = BattleEngine.newPokemon(9, 100)
     local b = BattleEngine.newBattle({ atk }, { def }, { seed = 1 })
 
-    local karateChop = Moves.get("KarateChop")
-    local dmgNormal = b:calcDamage(atk, def, karateChop)
-    atk.status = "burn"
-    local dmgBurned = b:calcDamage(atk, def, karateChop)
-    ok(dmgBurned < dmgNormal, "Burn reduces physical damage (" .. dmgBurned .. " < " .. dmgNormal .. ")")
-    ok(dmgBurned <= math.ceil(dmgNormal * 0.55), "Burn roughly halves physical damage")
+    -- Gen 1: burn is ignored on critical hits, so we must average over many
+    -- trials. Machop base speed 35 -> crit threshold = floor(35/2)*2 = 70,
+    -- crit rate ~27%. With highCrit (Karate Chop), threshold = 70*8=255 capped,
+    -- crit rate ~99.6% -- so use a non-highCrit move for the burn test.
+    local tackle = Moves.get("Tackle")
 
-    -- Burn does NOT affect special damage (average over many trials to control RNG)
+    -- Burn does NOT affect special damage (average over many trials)
     atk.status = nil
     local specialMove = Moves.get("Flamethrower")
     local specNormalSum, specBurnedSum = 0, 0
-    for _ = 1, 200 do
+    for _ = 1, 300 do
         specNormalSum = specNormalSum + b:calcDamage(atk, def, specialMove)
         atk.status = "burn"
         specBurnedSum = specBurnedSum + b:calcDamage(atk, def, specialMove)
         atk.status = nil
     end
-    local specRatio = (specBurnedSum / 200) / (specNormalSum / 200)
+    local specRatio = (specBurnedSum / 300) / (specNormalSum / 300)
     ok(specRatio > 0.85, "Burn does not halve special damage (avg ratio=" .. string.format("%.2f", specRatio) .. ")")
 
-    -- Verify burn DOES halve physical (average over many trials)
+    -- Verify burn DOES halve physical on non-crit hits.
+    -- We control for crits by checking per-trial: only compare non-crit results.
+    -- Simpler: use a very slow Pokemon so crit rate is near 0.
+    local slowAtk = BattleEngine.newPokemon(74, 100) -- Geodude, base spe 20
+    local slowDef = BattleEngine.newPokemon(9, 100)
+    local slowB = BattleEngine.newBattle({ slowAtk }, { slowDef }, { seed = 7 })
+    local dmgNormal = slowB:calcDamage(slowAtk, slowDef, tackle)
+    slowAtk.status = "burn"
+    local dmgBurned = slowB:calcDamage(slowAtk, slowDef, tackle)
+    -- Geodude base spe 20: threshold = floor(20/2)*2 = 20, crit rate = 20/256 ~ 7.8%
+    -- With one call each, there's a small chance of a crit on the normal roll.
+    -- Average over 300 trials for reliability.
     local physNormalSum, physBurnedSum = 0, 0
-    for _ = 1, 200 do
-        physNormalSum = physNormalSum + b:calcDamage(atk, def, karateChop)
-        atk.status = "burn"
-        physBurnedSum = physBurnedSum + b:calcDamage(atk, def, karateChop)
-        atk.status = nil
+    for _ = 1, 300 do
+        physNormalSum = physNormalSum + slowB:calcDamage(slowAtk, slowDef, tackle)
+        slowAtk.status = "burn"
+        physBurnedSum = physBurnedSum + slowB:calcDamage(slowAtk, slowDef, tackle)
+        slowAtk.status = nil
     end
-    local physRatio = (physBurnedSum / 200) / (physNormalSum / 200)
+    local physRatio = (physBurnedSum / 300) / (physNormalSum / 300)
     ok(physRatio < 0.65 and physRatio > 0.4, "Burn roughly halves physical damage (avg ratio=" .. string.format("%.2f", physRatio) .. ")")
+
+    -- Gen 1: crit ignores burn halving (crit uses unmodified attack)
+    local fastAtk = BattleEngine.newPokemon(150, 100) -- Mewtwo, base spe 130
+    local fastDef = BattleEngine.newPokemon(9, 100)
+    local fastB = BattleEngine.newBattle({ fastAtk }, { fastDef }, { seed = 3 })
+    local critIgnoresBurnSum = 0
+    local critCount = 0
+    for _ = 1, 300 do
+        fastB._lastCrit = nil
+        fastAtk.status = "burn"
+        fastB:calcDamage(fastAtk, fastDef, tackle)
+        if fastB._lastCrit then
+            critCount = critCount + 1
+        end
+    end
+    -- Mewtwo base spe 130: threshold = floor(130/2)*2 = 130, crit rate ~50.8%
+    ok(critCount > 100 and critCount < 200, "Mewtwo crit rate ~50% with Tackle (got " .. critCount .. "/300)")
+end
+
+----------------------------------------------------------------------
+-- 21. Gen 1 mechanics: crit uses base speed, high-crit x8, FE quarters
+----------------------------------------------------------------------
+do
+    -- High-crit move: Slash (Normal, highCrit). Mewtwo base spe 130.
+    -- threshold = floor(130/2)*8 = 65*8 = 520 -> capped 255 -> crit rate ~99.6%
+    local mewtwo = BattleEngine.newPokemon(150, 100)
+    local blastoise = BattleEngine.newPokemon(9, 100)
+    local b = BattleEngine.newBattle({ mewtwo }, { blastoise }, { seed = 42 })
+    local slash = Moves.get("Slash")
+    local critCount = 0
+    for _ = 1, 200 do
+        b._lastCrit = nil
+        b:calcDamage(mewtwo, blastoise, slash)
+        if b._lastCrit then critCount = critCount + 1 end
+    end
+    ok(critCount > 190, "High-crit Slash crits ~99.6% for Mewtwo (got " .. critCount .. "/200)")
+
+    -- Normal move: Tackle. Mewtwo base spe 130.
+    -- threshold = floor(130/2)*2 = 130 -> crit rate = 130/256 ~ 50.8%
+    local tackle = Moves.get("Tackle")
+    critCount = 0
+    for _ = 1, 200 do
+        b._lastCrit = nil
+        b:calcDamage(mewtwo, blastoise, tackle)
+        if b._lastCrit then critCount = critCount + 1 end
+    end
+    ok(critCount > 70 and critCount < 130, "Normal Tackle crits ~50% for Mewtwo (got " .. critCount .. "/200)")
+
+    -- Low base speed: Geodude base spe 20 -> threshold = floor(20/2)*2 = 20 -> ~7.8%
+    local geodude = BattleEngine.newPokemon(74, 100)
+    critCount = 0
+    for _ = 1, 200 do
+        b._lastCrit = nil
+        b:calcDamage(geodude, blastoise, tackle)
+        if b._lastCrit then critCount = critCount + 1 end
+    end
+    ok(critCount > 0 and critCount < 40, "Geodude crits ~7.8% with Tackle (got " .. critCount .. "/200)")
+
+    -- Focus Energy bug: quarters crit rate instead of boosting
+    local feAtk = BattleEngine.newPokemon(150, 100)
+    local feDef = BattleEngine.newPokemon(9, 100)
+    local feB = BattleEngine.newBattle({ feAtk }, { feDef }, { seed = 99 })
+    -- Without FE: threshold = 130, crit rate ~50.8%
+    local critNoFE = 0
+    for _ = 1, 200 do
+        feB._lastCrit = nil
+        feB:calcDamage(feAtk, feDef, tackle)
+        if feB._lastCrit then critNoFE = critNoFE + 1 end
+    end
+    -- With FE: threshold = floor(130/2) = 65, crit rate ~25.4% (quartered)
+    feAtk.volatile.focusEnergy = true
+    local critFE = 0
+    for _ = 1, 200 do
+        feB._lastCrit = nil
+        feB:calcDamage(feAtk, feDef, tackle)
+        if feB._lastCrit then critFE = critFE + 1 end
+    end
+    ok(critFE < critNoFE, "Focus Energy quarters crit rate in Gen 1 (" .. critFE .. " < " .. critNoFE .. ")")
+    ok(critFE > 20 and critFE < 80, "FE crit rate ~25% for Mewtwo (got " .. critFE .. "/200)")
+
+    -- Crit ignores stat stages: boost attacker's atk by +6, crit should use unmodified atk
+    local stageAtk = BattleEngine.newPokemon(68, 100) -- Machop
+    local stageDef = BattleEngine.newPokemon(9, 100)
+    local stageB = BattleEngine.newBattle({ stageAtk }, { stageDef }, { seed = 5 })
+    stageAtk.stages.atk = 6 -- +6 = 4x attack
+    -- Force a crit by using a very fast attacker
+    local fastAtk2 = BattleEngine.newPokemon(150, 100)
+    fastAtk2.stages.atk = 6
+    local stageB2 = BattleEngine.newBattle({ fastAtk2 }, { stageDef }, { seed = 5 })
+    -- On crit, attack should be unmodified (no 4x boost)
+    -- We verify by comparing crit damage to non-crit-no-stage damage
+    local critDmgs = {}
+    local normalDmgs = {}
+    for _ = 1, 300 do
+        stageB2._lastCrit = nil
+        local d = stageB2:calcDamage(fastAtk2, stageDef, tackle)
+        if stageB2._lastCrit then
+            critDmgs[#critDmgs + 1] = d
+        end
+    end
+    -- Without stages, crit damage should be similar range
+    fastAtk2.stages.atk = 0
+    local noStageCritDmgs = {}
+    for _ = 1, 300 do
+        stageB2._lastCrit = nil
+        local d = stageB2:calcDamage(fastAtk2, stageDef, tackle)
+        if stageB2._lastCrit then
+            noStageCritDmgs[#noStageCritDmgs + 1] = d
+        end
+    end
+    if #critDmgs > 0 and #noStageCritDmgs > 0 then
+        local avgCrit = 0
+        for _, d in ipairs(critDmgs) do avgCrit = avgCrit + d end
+        avgCrit = avgCrit / #critDmgs
+        local avgNoStage = 0
+        for _, d in ipairs(noStageCritDmgs) do avgNoStage = avgNoStage + d end
+        avgNoStage = avgNoStage / #noStageCritDmgs
+        -- Crit with +6 stages should be ~same as crit without stages (both use unmodified atk)
+        local ratio = avgCrit / avgNoStage
+        ok(ratio > 0.9 and ratio < 1.1, "Crit ignores stat stages (ratio=" .. string.format("%.2f", ratio) .. ")")
+    else
+        ok(false, "Crit ignores stat stages (not enough crit samples)")
+    end
+end
+
+----------------------------------------------------------------------
+-- 22. Gen 1 mechanics: freeze never self-thaws
+----------------------------------------------------------------------
+do
+    local atk = BattleEngine.newPokemon(68, 100, { moves = { "Tackle" } })
+    local def = BattleEngine.newPokemon(9, 100, { moves = { "Tackle" } })
+    atk.status = "freeze"
+    local b = BattleEngine.newBattle({ atk }, { def }, { seed = 1 })
+    local thawed = false
+    for _ = 1, 50 do
+        b:useMove(1, 1)
+        if atk.status ~= "freeze" then thawed = true break end
+    end
+    ok(not thawed, "Frozen Pokemon never thaws on its own in Gen 1")
+end
+
+----------------------------------------------------------------------
+-- 23. Gen 1 mechanics: sleep 1-7 turns, wake consumes turn
+----------------------------------------------------------------------
+do
+    local atk = BattleEngine.newPokemon(68, 100, { moves = { "Tackle" } })
+    local def = BattleEngine.newPokemon(9, 100, { moves = { "Tackle" } })
+    atk.status = "sleep"
+    atk.volatile.sleepTurns = 0
+    atk.volatile.sleepMax = 1 -- will wake after 1 turn of sleep
+    local b = BattleEngine.newBattle({ atk }, { def }, { seed = 1 })
+    -- Turn 1: sleepTurns becomes 1, 1 <= 1 so still asleep
+    b:useMove(1, 1)
+    ok(atk.status == "sleep", "Pokemon still asleep on turn 1")
+    ok(def.hp == def.maxHp, "No damage dealt while asleep")
+    -- Turn 2: sleepTurns becomes 2, 2 > 1 so wakes up but CANNOT move
+    local hpBefore = def.hp
+    b:useMove(1, 1)
+    ok(atk.status == nil, "Pokemon woke up on turn 2")
+    ok(def.hp == hpBefore, "Waking up consumes the turn (no move executed)")
+    -- Turn 3: should be able to move normally
+    b:useMove(1, 1)
+    ok(def.hp < hpBefore, "Pokemon can move after waking up")
+
+    -- Sleep max is 1-7 (test that sleepMax can be set to 7)
+    local atk2 = BattleEngine.newPokemon(68, 100, { moves = { "Tackle" } })
+    local def2 = BattleEngine.newPokemon(9, 100, { moves = { "Tackle" } })
+    atk2.status = "sleep"
+    atk2.volatile.sleepTurns = 0
+    atk2.volatile.sleepMax = 7
+    local b2 = BattleEngine.newBattle({ atk2 }, { def2 }, { seed = 2 })
+    local asleepTurns = 0
+    for _ = 1, 8 do
+        b2:useMove(1, 1)
+        if atk2.status == "sleep" then
+            asleepTurns = asleepTurns + 1
+        end
+    end
+    ok(asleepTurns == 7, "Pokemon sleeps for 7 turns with sleepMax=7 (got " .. asleepTurns .. ")")
+end
+
+----------------------------------------------------------------------
+-- 24. Gen 1 mechanics: confusion 2-5 turns, typeless self-hit
+----------------------------------------------------------------------
+do
+    -- Confusion self-hit is typeless (neutral vs Ghost)
+    local gengar = BattleEngine.newPokemon(94, 100) -- Ghost/Poison
+    local b = BattleEngine.newBattle({ gengar }, { gengar }, { seed = 1 })
+    local selfHitMove = { type = "???", cat = "physical", power = 40 }
+    local dmg = b:calcDamage(gengar, gengar, selfHitMove)
+    ok(dmg > 0, "Confusion self-hit deals damage to Ghost (typeless)")
+
+    -- Normal-type 40-power self-hit would be 0 vs Ghost (immune)
+    local normalSelfHit = { type = "Normal", cat = "physical", power = 40 }
+    local effVsGhost = Types.getEffectivenessVs("Normal", "Ghost", "Poison")
+    eq(effVsGhost, 0, "Normal is immune vs Ghost (confusion must be typeless)")
+
+    -- Struggle is also typeless
+    eq(Types.getEffectivenessVs("???", "Ghost", nil), 1, "Struggle/confusion type is neutral vs Ghost")
+    eq(Types.getEffectivenessVs("???", "Normal", nil), 1, "Typeless is neutral vs Normal")
+end
+
+----------------------------------------------------------------------
+-- 25. Gen 1 mechanics: status persists through switch
+----------------------------------------------------------------------
+do
+    local team = {
+        BattleEngine.newPokemon(68, 100, { moves = { "Tackle" } }),
+        BattleEngine.newPokemon(9, 100, { moves = { "Tackle" } }),
+    }
+    team[1].status = "burn"
+    local def = BattleEngine.newPokemon(1, 100, { moves = { "Tackle" } })
+    local b = BattleEngine.newBattle(team, { def }, { seed = 1 })
+    b:forceSwitch(1, 2)
+    -- Switching should NOT clear major status from the switched-out Pokemon
+    ok(team[1].status == "burn", "Burn persists on switched-out Pokemon")
+    -- But the newly-switched-in Pokemon should have no status
+    ok(team[2].status == nil, "Newly switched-in Pokemon has no status")
+    -- Volatile and stages should reset
+    team[1].stages.atk = 3
+    team[1].volatile.confusionTurns = 2
+    b:forceSwitch(1, 2) -- switch to 2 (already active? no, active is 2)
+    -- Switch back to 1
+    b:forceSwitch(1, 1)
+    eq(team[1].stages.atk, 0, "Stat stages reset on switch")
+    ok(team[1].volatile.confusionTurns == nil, "Volatile resets on switch")
+    ok(team[1].status == "burn", "Burn still persists after switching back in")
+end
+
+----------------------------------------------------------------------
+-- 26. Gen 1 mechanics: type-based status immunities
+----------------------------------------------------------------------
+do
+    local fireMon = BattleEngine.newPokemon(58, 100, { moves = { "Tackle" } }) -- Growlithe (Fire)
+    local atk = BattleEngine.newPokemon(68, 100, { moves = { "Ember" } })
+    local b = BattleEngine.newBattle({ atk }, { fireMon }, { seed = 1 })
+    local ember = Moves.get("Ember")
+    -- Ember has 30% burn chance; force it by using applyStatusMove directly
+    local fireDef = BattleEngine.newPokemon(58, 100)
+    local result = {}
+    b:applyStatusMove(atk, fireDef, { effect = { status = "burn" } }, result)
+    ok(fireDef.status == nil, "Fire-type cannot be burned")
+
+    -- Electric-type cannot be paralyzed
+    local elecDef = BattleEngine.newPokemon(25, 100) -- Pikachu (Electric)
+    b:applyStatusMove(atk, elecDef, { effect = { status = "paralysis" } }, result)
+    ok(elecDef.status == nil, "Electric-type cannot be paralyzed")
+
+    -- Ice-type cannot be frozen
+    local iceDef = BattleEngine.newPokemon(87, 100) -- Dewgong (Water/Ice)
+    b:applyStatusMove(atk, iceDef, { effect = { status = "freeze" } }, result)
+    ok(iceDef.status == nil, "Ice-type cannot be frozen")
+
+    -- Poison-type cannot be poisoned
+    local poisonDef = BattleEngine.newPokemon(88, 100) -- Grimer (Poison)
+    b:applyStatusMove(atk, poisonDef, { effect = { status = "poison" } }, result)
+    ok(poisonDef.status == nil, "Poison-type cannot be poisoned")
+
+    -- Poison-type cannot be badly poisoned (Toxic)
+    local poisonDef2 = BattleEngine.newPokemon(88, 100)
+    b:applyStatusMove(atk, poisonDef2, { effect = { toxic = true } }, result)
+    ok(poisonDef2.status == nil, "Poison-type cannot be badly poisoned")
+end
+
+----------------------------------------------------------------------
+-- 27. Gen 1 mechanics: Mist blocks stat drops
+----------------------------------------------------------------------
+do
+    local atk = BattleEngine.newPokemon(68, 100, { moves = { "Tackle" } })
+    local def = BattleEngine.newPokemon(1, 100, { moves = { "Growl" } })
+    def.volatile.mist = true
+    local b = BattleEngine.newBattle({ atk }, { def }, { seed = 1 })
+    local result = {}
+    b:applyStatusMove(atk, def, { effect = { boost = { stat = "atk", stages = -1 } } }, result)
+    eq(def.stages.atk, 0, "Mist blocks opponent's stat drop")
+
+    -- Mist does NOT block self boosts
+    local atk2 = BattleEngine.newPokemon(68, 100)
+    atk2.volatile.mist = true
+    b:applyStatusMove(atk2, def, { effect = { boost = { stat = "atk", stages = 1 } } }, result)
+    eq(atk2.stages.atk, 1, "Mist does not block self stat boosts")
+end
+
+----------------------------------------------------------------------
+-- 28. Gen 1 mechanics: Substitute blocks secondary effects
+----------------------------------------------------------------------
+do
+    local atk = BattleEngine.newPokemon(68, 100, { moves = { "BodySlam" } })
+    local def = BattleEngine.newPokemon(1, 100, { moves = { "Tackle" } })
+    def.volatile.substitute = 50
+    local b = BattleEngine.newBattle({ atk }, { def }, { seed = 1 })
+    -- BodySlam has 30% paralysis chance
+    -- When substitute absorbs the hit, lastDamageTaken is set to 0
+    -- and applyEffect should skip status/boost/flinch
+    -- We use a large substitute HP so it never breaks during the test
+    local paraApplied = false
+    for trial = 1, 30 do
+        def.hp = def.maxHp
+        def.volatile.substitute = 9999 -- large enough to never break
+        def.status = nil
+        local r = b:useMove(1, 1)
+        if def.status == "paralysis" then
+            paraApplied = true
+            break
+        end
+    end
+    ok(not paraApplied, "Substitute blocks secondary status effects")
+
+    -- Also verify: without substitute, paralysis CAN be applied (control test)
+    -- Use a weaker attacker and high-HP defender to avoid fainting
+    local weakAtk = BattleEngine.newPokemon(129, 100, { moves = { "BodySlam" } }) -- Magikarp
+    local tankDef = BattleEngine.newPokemon(113, 100, { moves = { "Tackle" } }) -- Chansey, huge HP
+    local ctrlB = BattleEngine.newBattle({ weakAtk }, { tankDef }, { seed = 5 })
+    local paraAppliedNoSub = false
+    for trial = 1, 300 do
+        tankDef.hp = tankDef.maxHp
+        tankDef.volatile.substitute = nil
+        tankDef.status = nil
+        tankDef.lastDamageTaken = 0
+        local r = ctrlB:useMove(1, 1)
+        if tankDef.status == "paralysis" then
+            paraAppliedNoSub = true
+            break
+        end
+    end
+    ok(paraAppliedNoSub, "Without substitute, BodySlam can paralyze (control test)")
+end
+
+----------------------------------------------------------------------
+-- 29. Gen 1 mechanics: Counter uses lastHitType
+----------------------------------------------------------------------
+do
+    local atk = BattleEngine.newPokemon(68, 100, { moves = { "Tackle" } })
+    local def = BattleEngine.newPokemon(9, 100, { moves = { "Counter" } })
+    local b = BattleEngine.newBattle({ atk }, { def }, { seed = 1 })
+    -- Hit the Counter user with a physical move
+    b:useMove(1, 1) -- atk uses Tackle on def
+    ok(def.lastDamageTaken > 0, "Counter user took physical damage")
+    ok(def.lastHitType == "physical", "lastHitType is tracked as physical")
+    -- Now Counter should deal 2x the last damage taken
+    local counterDmg = b:calcDamage(def, atk, Moves.get("Counter"))
+    ok(counterDmg > 0, "Counter deals damage based on last physical hit taken")
+    eq(counterDmg, def.lastDamageTaken * 2, "Counter = 2x last physical damage taken")
+
+    -- Counter should fail if last hit was special
+    local atk2 = BattleEngine.newPokemon(94, 100, { moves = { "ConfuseRay" } }) -- Gengar, special move
+    local def2 = BattleEngine.newPokemon(9, 100, { moves = { "Counter" } })
+    local b2 = BattleEngine.newBattle({ atk2 }, { def2 }, { seed = 2 })
+    -- Use a special move to hit def2
+    def2.lastDamageTaken = 50
+    def2.lastHitType = "special"
+    local counterDmg2 = b2:calcDamage(def2, atk2, Moves.get("Counter"))
+    eq(counterDmg2, 0, "Counter fails against special move")
+
+    -- Counter should also work via useMove (full integration)
+    local atk3 = BattleEngine.newPokemon(68, 100, { moves = { "Tackle" } })
+    local def3 = BattleEngine.newPokemon(9, 100, { moves = { "Counter" } })
+    local b3 = BattleEngine.newBattle({ atk3 }, { def3 }, { seed = 10 })
+    b3:useMove(1, 1) -- Tackle hits def3
+    local tackleDmg = def3.lastDamageTaken
+    ok(tackleDmg > 0, "Tackle dealt damage for Counter integration test")
+    local r3 = b3:useMove(2, 1) -- def3 uses Counter
+    ok(r3.damage > 0, "Counter deals damage via useMove (got " .. r3.damage .. ")")
+    eq(r3.damage, tackleDmg * 2, "Counter via useMove = 2x last damage (" .. r3.damage .. " = 2*" .. tackleDmg .. ")")
+end
+
+----------------------------------------------------------------------
+-- 30. Gen 1 mechanics: Hyper Beam recharge + Explosion faints user
+----------------------------------------------------------------------
+do
+    -- Hyper Beam recharge
+    local atk = BattleEngine.newPokemon(68, 100, { moves = { "HyperBeam" } })
+    local def = BattleEngine.newPokemon(9, 100, { moves = { "Tackle" } })
+    local b = BattleEngine.newBattle({ atk }, { def }, { seed = 1 })
+    b:useMove(1, 1)
+    ok(def.hp < def.maxHp, "Hyper Beam deals damage")
+    ok(atk.volatile.recharge == true, "Hyper Beam sets recharge flag")
+    local hpBefore = def.hp
+    b:useMove(1, 1)
+    eq(def.hp, hpBefore, "Hyper Beam user must recharge (no damage on recharge turn)")
+    ok(atk.volatile.recharge == nil, "Recharge flag cleared after recharge turn")
+
+    -- Explosion faints user
+    local atk2 = BattleEngine.newPokemon(68, 100, { moves = { "Explosion" } })
+    local def2 = BattleEngine.newPokemon(9, 100, { moves = { "Tackle" } })
+    local b2 = BattleEngine.newBattle({ atk2 }, { def2 }, { seed = 2 })
+    local r = b2:useMove(1, 1)
+    ok(def2.hp < def2.maxHp, "Explosion deals damage to target")
+    eq(atk2.hp, 0, "Explosion faints the user")
+    ok(r.selfKo == true, "Explosion result has selfKo flag")
+
+    -- Self-Destruct also faints user
+    local atk3 = BattleEngine.newPokemon(68, 100, { moves = { "SelfDestruct" } })
+    local def3 = BattleEngine.newPokemon(9, 100, { moves = { "Tackle" } })
+    local b3 = BattleEngine.newBattle({ atk3 }, { def3 }, { seed = 3 })
+    b3:useMove(1, 1)
+    eq(atk3.hp, 0, "Self-Destruct faints the user")
+end
+
+----------------------------------------------------------------------
+-- 31. Gen 1 mechanics: stat >255 division rule
+----------------------------------------------------------------------
+do
+    -- Mewtwo L100 atk = 2*110+98 = 318 > 255
+    local mewtwo = BattleEngine.newPokemon(150, 100)
+    ok(mewtwo.stats.atk > 255, "Mewtwo L100 atk > 255 (" .. mewtwo.stats.atk .. ")")
+    local def = BattleEngine.newPokemon(9, 100) -- Blastoise, def = 2*79+98 = 256 > 255
+    ok(def.stats.def > 255, "Blastoise L100 def > 255 (" .. def.stats.def .. ")")
+    local b = BattleEngine.newBattle({ mewtwo }, { def }, { seed = 1 })
+    local tackle = Moves.get("Tackle")
+    -- Average over many trials to get a stable damage estimate
+    local sum = 0
+    local trials = 200
+    for _ = 1, trials do
+        sum = sum + b:calcDamage(mewtwo, def, tackle)
+    end
+    local avgDmg = sum / trials
+    ok(avgDmg > 0, "Damage calculated with >255 stats (A and D both /4)")
+    -- Verify: a=318, d=256 -> both >255 -> a=79, d=64
+    -- base = floor(floor(floor(2*100/5+2)*40*79/64)/50)+2 = floor(floor(42*40*79/64)/50)+2
+    -- = floor(floor(132720/64)/50)+2 = floor(2073/50)+2 = 41+2 = 43
+    -- STAB=1 (Mewtwo is Psychic, Tackle is Normal), eff=1, rand avg ~236
+    -- avg dmg ~ floor(43 * 236/255) = ~39.8
+    -- But crits (Mewtwo base spe 130 -> ~50% crit) double level in formula:
+    -- crit base = floor(floor(floor(2*100*2/5+2)*40*79/64)/50)+2
+    --   = floor(floor(floor(82*40*79/64)/50)+2 = floor(floor(259120/64)/50)+2
+    --   = floor(4048/50)+2 = 80+2 = 82 -> avg ~ floor(82*236/255) = ~75.8
+    -- Mixed avg ~ (39.8 + 75.8) / 2 ~ 57.8
+    ok(avgDmg >= 40 and avgDmg <= 75, "Damage with >255 stats in expected range (avg=" .. string.format("%.1f", avgDmg) .. ")")
+end
+
+----------------------------------------------------------------------
+-- 32. Gen 1 mechanics: Skull Bash is two-turn
+----------------------------------------------------------------------
+do
+    local atk = BattleEngine.newPokemon(68, 100, { moves = { "SkullBash2" } })
+    local def = BattleEngine.newPokemon(9, 100, { moves = { "Tackle" } })
+    local b = BattleEngine.newBattle({ atk }, { def }, { seed = 1 })
+    b:useMove(1, 1)
+    eq(def.hp, def.maxHp, "Skull Bash turn 1: charging (no damage)")
+    ok(atk.volatile.charging == "charge", "Skull Bash sets charging state")
+    b:useMove(1, 1)
+    ok(def.hp < def.maxHp, "Skull Bash turn 2: deals damage")
+end
+
+----------------------------------------------------------------------
+-- 33. Gen 1 mechanics: Razor Wind is high-crit + two-turn
+----------------------------------------------------------------------
+do
+    local rw = Moves.get("RazorWind")
+    ok(rw.highCrit == true, "Razor Wind has highCrit flag")
+    ok(rw.twoTurn == "charge", "Razor Wind is two-turn")
+
+    -- Verify all Gen 1 high-crit moves have the flag
+    local highCritMoves = { "Slash", "KarateChop", "RazorLeaf", "Crabhammer2", "RazorWind" }
+    for _, id in ipairs(highCritMoves) do
+        local m = Moves.get(id)
+        ok(m and m.highCrit == true, id .. " has highCrit flag")
+    end
+
+    -- Karate Chop is Normal-type in Gen 1
+    local kc = Moves.get("KarateChop")
+    eq(kc.type, "Normal", "Karate Chop is Normal-type in Gen 1")
 end
 
 ----------------------------------------------------------------------

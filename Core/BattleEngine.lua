@@ -9,7 +9,7 @@ local PRNG = require("Core.Util.PRNG")
 
 BattleEngine.MAX_TEAM = 6
 BattleEngine.MAX_TURNS = 200 -- hard cap; prevents PP-stall infinite loops
-BattleEngine.STRUGGLE = { id = "Struggle", type = "Normal", power = 50, acc = 100, pp = 1, effect = { recoil = 0.25 } }
+BattleEngine.STRUGGLE = { id = "Struggle", type = "???", power = 50, acc = 100, pp = 1, effect = { recoil = 0.25 } }
 BattleEngine.STATUSES = { burn = true, poison = true, paralysis = true, sleep = true, freeze = true, confusion = true }
 
 local function clampStage(s) return math.max(-6, math.min(6, s)) end
@@ -55,6 +55,7 @@ function BattleEngine.newPokemon(speciesId, level, opts)
         fainted = false,
         lastDamageTaken = 0,
         lastMoveType = nil,
+        lastHitType = nil,
     }
 end
 
@@ -198,7 +199,6 @@ end
 function BattleEngine:resetVolatile(p)
     p.stages = { atk = 0, def = 0, spa = 0, spd = 0, spe = 0, acc = 0, eva = 0 }
     p.volatile = {}
-    p.status = nil
 end
 
 function BattleEngine:speedOf(p)
@@ -262,14 +262,10 @@ function BattleEngine:useMove(attackerSide, moveIndex, defenderSide)
         atk.status = nil
         atk.volatile.sleepTurns = nil
         self:logMsg(atk.name .. " woke up!")
+        return result
     elseif atk.status == "freeze" then
-        if self.rng:chance(20) then
-            atk.status = nil
-            self:logMsg(atk.name .. " thawed out!")
-        else
-            self:logMsg(atk.name .. " is frozen solid!")
-            return result
-        end
+        self:logMsg(atk.name .. " is frozen solid!")
+        return result
     elseif atk.status == "paralysis" then
         if self.rng:chance(25) then
             self:logMsg(atk.name .. " is fully paralyzed! It can't move!")
@@ -284,7 +280,7 @@ function BattleEngine:useMove(attackerSide, moveIndex, defenderSide)
         else
             self:logMsg(atk.name .. " is confused!")
             if self.rng:chance(50) then
-                local dmg = self:calcDamage(atk, atk, { type = "Normal", cat = "physical", power = 40 })
+                local dmg = self:calcDamage(atk, atk, { type = "???", cat = "physical", power = 40 })
                 atk.hp = math.max(0, atk.hp - dmg)
                 self:logMsg("It hurt itself in its confusion! (" .. dmg .. " damage)")
                 result.hit = true
@@ -299,6 +295,13 @@ function BattleEngine:useMove(attackerSide, moveIndex, defenderSide)
     if atk.volatile.flinch then
         atk.volatile.flinch = nil
         self:logMsg(atk.name .. " flinched!")
+        return result
+    end
+
+    -- Hyper Beam recharge (Gen 1: must recharge after use, unless target faints)
+    if atk.volatile.recharge then
+        atk.volatile.recharge = nil
+        self:logMsg(atk.name .. " must recharge!")
         return result
     end
 
@@ -335,8 +338,8 @@ function BattleEngine:useMove(attackerSide, moveIndex, defenderSide)
         end
     end
 
-    -- Status moves
-    if (move.cat or Types.categoryFor(move.type)) == "status" or move.power == 0 then
+    -- Status moves (Counter has power=0 but fixed damage, so it's NOT a status move)
+    if (move.cat or Types.categoryFor(move.type)) == "status" and not move.fixed then
         result.hit = true
         self:applyStatusMove(atk, def, move, result)
         return result
@@ -383,6 +386,7 @@ function BattleEngine:useMove(attackerSide, moveIndex, defenderSide)
         else
             def.hp = math.max(0, def.hp - damage)
             def.lastDamageTaken = damage
+            def.lastHitType = (move.cat or Types.categoryFor(move.type))
         end
         if def.hp <= 0 then break end
     end
@@ -407,13 +411,34 @@ function BattleEngine:useMove(attackerSide, moveIndex, defenderSide)
         self:applyEffect(atk, def, move, totalDamage, result)
     end
 
+    -- Hyper Beam: user must recharge next turn (unless target fainted)
+    if move.recharge and def.hp > 0 then
+        atk.volatile.recharge = true
+    end
+
+    -- Explosion / Self-Destruct: user faints after the move
+    if move.explode then
+        atk.hp = 0
+        self:logMsg(atk.name .. " fainted from the explosion!")
+        result.selfKo = true
+    end
+
     if def.hp <= 0 then result.ko = true end
     return result
 end
 
--- Gen 1 damage formula (simplified):
---   dmg = floor(floor(floor(2*level/5 + 2) * power * A / D) / 50) + 2
---   then STAB (x1.5), type effectiveness, crit (x2), random 217-255/255
+-- Canonical Gen 1 damage formula (Bulbapedia / Showdown gen1 mod):
+--   Damage = ((2*Level*Crit/5 + 2) * Power * A/D / 50 + 2) * STAB * Type1 * Type2 * Rand
+-- where Crit = 2 on a critical hit (multiplies Level, not final damage),
+-- Rand = random integer 217-255, then floor(damage * Rand / 255).
+-- On a crit, ALL stat stage modifiers, burn halving, and Reflect/Light
+-- Screen doubling are ignored (unmodified A/D used).
+-- Gen 1 crit algorithm (from Showdown gen1/scripts.ts):
+--   threshold = floor(baseSpeed / 2)
+--   if highCrit move: threshold *= 8, clamped to 255
+--   else:             threshold *= 2, clamped to 255
+--   if Focus Energy:  threshold = floor(threshold / 2)  (Gen 1 bug: quarters crit rate)
+--   crit if rng < threshold / 256
 function BattleEngine:calcDamage(atk, def, move)
     local level = atk.level
     local power = move.power or 0
@@ -429,42 +454,71 @@ function BattleEngine:calcDamage(atk, def, move)
         return 0
     end
     if move.fixed == "counter" then
-        local taken = def.lastDamageTaken or 0
-        if taken <= 0 or def.lastMoveType ~= "physical" then return 0 end
+        local taken = atk.lastDamageTaken or 0
+        if taken <= 0 or atk.lastHitType ~= "physical" then return 0 end
         return taken * 2
     end
     if power <= 0 then return 0 end
 
     local cat = move.cat or Types.categoryFor(move.type)
     local isPhysical = cat == "physical"
-    local a = isPhysical and atk.stats.atk or atk.stats.spa
-    local d = isPhysical and def.stats.def or def.stats.spd
 
-    a = math.max(1, math.floor(a * self.stageMultiplier(clampStage(atk.stages.atk or 0))))
-    d = math.max(1, math.floor(d * self.stageMultiplier(clampStage(def.stages.def or 0))))
-    if atk.status == "burn" and isPhysical then a = math.max(1, math.floor(a / 2)) end
+    -- Gen 1 critical hit: threshold based on BASE speed (species base stat)
+    local baseSpe = atk.species and atk.species.base.spe or atk.stats.spe
+    local threshold = math.floor(baseSpe / 2)
+    if move.highCrit then
+        threshold = math.min(255, threshold * 8)
+    else
+        threshold = math.min(255, threshold * 2)
+    end
+    if atk.volatile.focusEnergy then
+        threshold = math.max(1, math.floor(threshold / 2))
+    end
+    local crit = self.rng:nextFloat() < threshold / 256
+    if crit then self._lastCrit = true end
 
-    -- Reflect / Light Screen halve damage on their respective category
-    if def.volatile.reflect and isPhysical then d = d * 2 end
-    if def.volatile.lightScreen and not isPhysical then d = d * 2 end
+    -- Stats: on a crit, use UNMODIFIED attack/defense (ignore stages, burn, screens)
+    local a, d
+    if crit then
+        a = isPhysical and atk.stats.atk or atk.stats.spa
+        d = isPhysical and def.stats.def or def.stats.spd
+    else
+        a = isPhysical and atk.stats.atk or atk.stats.spa
+        d = isPhysical and def.stats.def or def.stats.spd
+        a = math.max(1, math.floor(a * self.stageMultiplier(clampStage(atk.stages.atk or 0))))
+        d = math.max(1, math.floor(d * self.stageMultiplier(clampStage(def.stages.def or 0))))
+        if atk.status == "burn" and isPhysical then a = math.max(1, math.floor(a / 2)) end
+        if def.volatile.reflect and isPhysical then d = d * 2 end
+        if def.volatile.lightScreen and not isPhysical then d = d * 2 end
+    end
 
-    local base = math.floor(math.floor(math.floor(2 * level / 5 + 2) * power * a / math.max(1, d)) / 50) + 2
+    -- Explosion / Self-Destruct halve the target's Defense (Gen 1, min 1)
+    if move.explode then d = math.max(1, math.floor(d / 2)) end
+
+    -- Gen 1: if A or D > 255, both are divided by 4 (rounded down)
+    if a > 255 or d > 255 then
+        a = math.max(1, math.floor(a / 4))
+        d = math.max(1, math.floor(d / 4))
+    end
+
+    local critMult = crit and 2 or 1
+    local base = math.floor(math.floor(math.floor(2 * level * critMult / 5 + 2) * power * a / math.max(1, d)) / 50) + 2
 
     local stab = 1
-    if atk.types[1] == move.type or atk.types[2] == move.type then stab = 1.5 end
+    if move.type ~= "???" and (atk.types[1] == move.type or atk.types[2] == move.type) then stab = 1.5 end
 
     local eff = Types.getEffectivenessVs(move.type, def.types[1], def.types[2])
 
-    -- Critical hit: Gen 1 uses base speed / 512 (highCrit doubles)
-    local critChance = atk.stats.spe / 512
-    if move.highCrit then critChance = critChance * 2 end
-    if atk.volatile.focusEnergy then critChance = critChance * 4 end
-    local crit = self.rng:chance(math.min(100, critChance * 100)) and 2 or 1
-    if crit == 2 then self._lastCrit = true end
+    local preRand = base * stab * eff
+    if preRand < 1 then
+        local rand = 217 + math.floor(self.rng:nextFloat() * 39)
+        local damage = math.floor(preRand * rand / 255)
+        if damage < 1 then damage = 1 end
+        return damage
+    end
 
     local rand = 217 + math.floor(self.rng:nextFloat() * 39)
-
-    local damage = math.floor(base * stab * eff * crit * rand / 255)
+    local damage = math.floor(preRand * rand / 255)
     if damage < 1 then damage = 1 end
     return damage
 end
@@ -481,18 +535,41 @@ function BattleEngine:applyStatusMove(atk, def, move, result)
             self:logMsg("But it failed!")
             return
         end
+        -- Gen 1 type-based status immunities
+        local t1, t2 = def.types[1], def.types[2]
+        if eff.status == "burn" and (t1 == "Fire" or t2 == "Fire") then
+            self:logMsg("But it failed!")
+            return
+        end
+        if eff.status == "paralysis" and (t1 == "Electric" or t2 == "Electric") then
+            self:logMsg("But it failed!")
+            return
+        end
+        if eff.status == "freeze" and (t1 == "Ice" or t2 == "Ice") then
+            self:logMsg("But it failed!")
+            return
+        end
+        if (eff.status == "poison" or eff.status == "toxic") and (t1 == "Poison" or t2 == "Poison") then
+            self:logMsg("But it failed!")
+            return
+        end
         def.status = eff.status
         if eff.status == "sleep" then
             def.volatile.sleepTurns = 0
-            def.volatile.sleepMax = self.rng:nextInt(1, 3)
+            def.volatile.sleepMax = self.rng:nextInt(1, 7)
         elseif eff.status == "confusion" then
             def.volatile.confusionTurns = 0
-            def.volatile.confusionMax = self.rng:nextInt(1, 4)
+            def.volatile.confusionMax = self.rng:nextInt(2, 5)
         end
         self:logMsg(def.name .. " was " .. BattleEngine.statusVerb(eff.status) .. "!")
     end
     if eff.toxic then
         if def.status then
+            self:logMsg("But it failed!")
+            return
+        end
+        local t1, t2 = def.types[1], def.types[2]
+        if t1 == "Poison" or t2 == "Poison" then
             self:logMsg("But it failed!")
             return
         end
@@ -504,12 +581,16 @@ function BattleEngine:applyStatusMove(atk, def, move, result)
         local stat = eff.boost.stat
         local stages = eff.boost.stages
         local target = (stages < 0) and def or atk
-        local cur = target.stages[stat] or 0
-        if (stages > 0 and cur < 6) or (stages < 0 and cur > -6) then
-            target.stages[stat] = clampStage(cur + stages)
-            self:logMsg(target.name .. "'s " .. stat .. " " .. (stages > 0 and "rose" or "fell") .. "!")
-        else
+        if stages < 0 and target.volatile.mist then
             self:logMsg("But it failed!")
+        else
+            local cur = target.stages[stat] or 0
+            if (stages > 0 and cur < 6) or (stages < 0 and cur > -6) then
+                target.stages[stat] = clampStage(cur + stages)
+                self:logMsg(target.name .. "'s " .. stat .. " " .. (stages > 0 and "rose" or "fell") .. "!")
+            else
+                self:logMsg("But it failed!")
+            end
         end
     end
     if eff.heal then
@@ -615,6 +696,8 @@ function BattleEngine:applyEffect(atk, def, move, damage, result)
     local eff = move.effect
     if not eff then return end
 
+    local subBlocked = def.volatile.substitute ~= nil and def.lastDamageTaken == 0
+
     if eff.drain and damage > 0 then
         local heal = math.max(1, math.floor(damage * eff.drain))
         atk.hp = math.min(atk.maxHp, atk.hp + heal)
@@ -626,13 +709,20 @@ function BattleEngine:applyEffect(atk, def, move, damage, result)
         self:logMsg(atk.name .. " was hurt by recoil! (" .. recoil .. " damage)")
         if atk.hp <= 0 then result.ko = true end
     end
-    if eff.status and self.rng:chance(eff.statusChance or 100) then
+    if eff.status and not subBlocked and self.rng:chance(eff.statusChance or 100) then
         if not def.status and not def.fainted then
-            if not (eff.status == "sleep" and (def.types[1] == "Ghost" or def.types[2] == "Ghost")) then
+            local t1, t2 = def.types[1], def.types[2]
+            local canInflict = true
+            if eff.status == "sleep" and (t1 == "Ghost" or t2 == "Ghost") then canInflict = false end
+            if eff.status == "burn" and (t1 == "Fire" or t2 == "Fire") then canInflict = false end
+            if eff.status == "paralysis" and (t1 == "Electric" or t2 == "Electric") then canInflict = false end
+            if eff.status == "freeze" and (t1 == "Ice" or t2 == "Ice") then canInflict = false end
+            if eff.status == "poison" and (t1 == "Poison" or t2 == "Poison") then canInflict = false end
+            if canInflict then
                 def.status = eff.status
                 if eff.status == "confusion" then
                     def.volatile.confusionTurns = 0
-                    def.volatile.confusionMax = self.rng:nextInt(1, 4)
+                    def.volatile.confusionMax = self.rng:nextInt(2, 5)
                 end
                 self:logMsg(def.name .. " was " .. BattleEngine.statusVerb(eff.status) .. "!")
             end
@@ -641,11 +731,17 @@ function BattleEngine:applyEffect(atk, def, move, damage, result)
     if eff.boost and self.rng:chance(eff.boostChance or 100) then
         local stat = eff.boost.stat
         local target = (eff.boost.stages < 0) and def or atk
-        local cur = target.stages[stat] or 0
-        target.stages[stat] = clampStage(cur + eff.boost.stages)
-        self:logMsg(target.name .. "'s " .. stat .. " " .. (eff.boost.stages > 0 and "rose" or "fell") .. "!")
+        if eff.boost.stages < 0 and target.volatile.mist then
+            -- Mist blocks opponent's stat drops
+        elseif eff.boost.stages < 0 and subBlocked then
+            -- Substitute blocks stat drops from damaging moves
+        else
+            local cur = target.stages[stat] or 0
+            target.stages[stat] = clampStage(cur + eff.boost.stages)
+            self:logMsg(target.name .. "'s " .. stat .. " " .. (eff.boost.stages > 0 and "rose" or "fell") .. "!")
+        end
     end
-    if eff.flinchChance and self.rng:chance(eff.flinchChance) then
+    if eff.flinchChance and not subBlocked and self.rng:chance(eff.flinchChance) then
         if self:speedOf(atk) > self:speedOf(def) then
             def.volatile.flinch = true
         end
