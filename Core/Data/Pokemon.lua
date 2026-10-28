@@ -361,7 +361,7 @@ end
 
 function PokemonData.getByName(name)
     local id = PokemonData.byName[(name or ""):lower()]
-    return id and P[id] or nil
+    return id or nil
 end
 
 function PokemonData.count()

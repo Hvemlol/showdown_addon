@@ -231,7 +231,7 @@ function BattleEngine:useMove(attackerSide, moveIndex, defenderSide)
     if not def or def.fainted then return result end
 
     local moveSlot = atk.moves[moveIndex]
-    local move
+    local move, moveName
     if not moveSlot or moveSlot.pp <= 0 or moveSlot.disabled then
         -- Struggle when no usable move remains
         local anyUsable = false
@@ -241,12 +241,14 @@ function BattleEngine:useMove(attackerSide, moveIndex, defenderSide)
         if not anyUsable then
             self:logMsg(atk.name .. " has no moves left! It used Struggle!")
             move = BattleEngine.STRUGGLE
+            moveName = "Struggle"
         else
             self:logMsg(atk.name .. " can't use that move!")
             return result
         end
     else
         move = Moves.get(moveSlot.id)
+        moveName = Moves.displayName(moveSlot.id)
         moveSlot.pp = moveSlot.pp - 1
     end
 
@@ -300,7 +302,7 @@ function BattleEngine:useMove(attackerSide, moveIndex, defenderSide)
         return result
     end
 
-    self:logMsg(atk.name .. " used " .. (move.id or "Struggle") .. "!")
+    self:logMsg(atk.name .. " used " .. moveName .. "!")
     atk.lastMoveType = (move.cat or Types.categoryFor(move.type))
 
     -- Two-turn moves
