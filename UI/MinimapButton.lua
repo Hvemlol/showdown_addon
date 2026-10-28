@@ -29,9 +29,12 @@ function MinimapButton:Create(onClick)
     icon:SetPoint("CENTER")
     icon:SetTexture("Interface\\Icons\\INV_Misc_Head_Dragon_01")
 
+    -- No floating label: it overlapped the minimap ring at most angles.
+    -- The tooltip (OnEnter) already says "Showdown Clone".
     local label = button:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    label:SetPoint("BOTTOM", button, "TOP", 0, 2)
-    label:SetText("Showdown")
+    label:SetPoint("CENTER", button, "CENTER", 0, 0)
+    label:SetText("SC")
+    label:SetTextColor(1, 1, 1, 1)
 
     button:SetScript("OnDragStart", function(self)
         dragging = true

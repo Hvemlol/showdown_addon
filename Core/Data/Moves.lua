@@ -277,4 +277,19 @@ function Moves.exists(id)
     return Moves.list[id] ~= nil
 end
 
+-- Human-readable move name for UI display. Strips the internal "2" suffix
+-- (used for learnset-only Gen 1 moves) and splits PascalCase ids into words.
+local _displayCache = {}
+function Moves.displayName(id)
+    local cached = _displayCache[id]
+    if cached then return cached end
+    local name = id:gsub("2$", "")
+    -- Insert a space before each uppercase letter that follows a lowercase one
+    name = name:gsub("(%l)(%u)", "%1 %2")
+    -- Capitalize the first letter
+    name = name:gsub("^%l", string.upper)
+    _displayCache[id] = name
+    return name
+end
+
 return Moves

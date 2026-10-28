@@ -3,6 +3,7 @@ local TeamBuilder = {}
 local PokemonData = require("Core.Data.Pokemon")
 local BattleEngine = require("Core.BattleEngine")
 local Moves = require("Core.Data.Moves")
+local Types = require("Core.Data.Types")
 local Stats = require("Core.Stats")
 local Serializer = require("Core.Util.Serializer")
 
@@ -44,6 +45,10 @@ function TeamBuilder:Hide()
     if frame then frame:Hide() end
 end
 
+function TeamBuilder:IsOpen()
+    return frame and frame:IsShown()
+end
+
 function TeamBuilder:Build()
     frame = CreateFrame("Frame", "ShowdownCloneTeamBuilder", UIParent, "BasicFrameTemplateWithInset")
     frame:SetSize(760, 500)
@@ -57,6 +62,21 @@ function TeamBuilder:Build()
     frame.title = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     frame.title:SetPoint("TOPLEFT", frame.TitleBg, "TOPLEFT", 12, -8)
     frame.title:SetText("Showdown Clone - Team Builder")
+
+    -- Close button + Esc-to-close (standard WoW window behavior)
+    local closeBtn = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
+    closeBtn:SetPoint("TOPRIGHT", frame.TitleBg, "TOPRIGHT", -2, -2)
+    closeBtn:SetScript("OnClick", function() TeamBuilder:Hide() end)
+    frame:SetScript("OnKeyDown", function(self, key)
+        if key == "ESCAPE" then
+            TeamBuilder:Hide()
+            self:SetPropagateKeyboardInput(false)
+        else
+            self:SetPropagateKeyboardInput(true)
+        end
+    end)
+    frame:SetPropagateKeyboardInput(true)
+    tinsert(UISpecialFrames, frame:GetName())
 
     -- Left: current team (6 slots)
     local teamFrame = CreateFrame("Frame", nil, frame, "InsetFrameTemplate3")
@@ -142,11 +162,14 @@ function TeamBuilder:Refresh()
         if entry then
             local species = PokemonData.get(entry.id)
             local name = entry.nickname or (species and species.name or "?")
-            local moves = entry.moves or {}
-            slot:SetText(string.format("#%d %s Lv%d\n    %s", i, name, entry.level, table.concat(moves, ", ")))
+            local moveNames = {}
+            for _, mid in ipairs(entry.moves or {}) do
+                moveNames[#moveNames + 1] = Moves.displayName(mid)
+            end
+            slot:SetText(string.format("#%d %s Lv%d\n    %s", i, name, entry.level, table.concat(moveNames, ", ")))
             slot:SetNormalFontObject("GameFontNormalLeft")
         else
-            slot:SetText("#%d (empty)\n    click to add a Pokemon"):format(i)
+            slot:SetText(string.format("#%d (empty)\n    click to add a Pokemon", i))
             slot:SetNormalFontObject("GameFontNormalLeft")
         end
     end
@@ -159,28 +182,39 @@ function TeamBuilder:RefreshBrowser()
     frame.browserButtons = {}
     local y = -4
     local count = 0
+    local total = 0
     for _, species in ipairs(speciesList()) do
         if searchText == "" or species.name:lower():find(searchText, 1, true) then
-            local btn = CreateFrame("Button", nil, content)
-            btn:SetSize(370, 22)
-            btn:SetPoint("TOPLEFT", 4, y)
-            btn:SetText(string.format("%03d %s (%s)", species.id, species.name, table.concat(species.types, "/")))
-            btn:SetNormalFontObject("GameFontNormalLeft")
-            btn:SetHighlightFontObject("GameFontHighlightLeft")
-            btn:SetScript("OnClick", function()
-                frame.selectedSpeciesId = species.id
-                for _, b in ipairs(frame.browserButtons) do b:UnlockHighlight() end
-                btn:LockHighlight()
-                TeamBuilder:RefreshMovePicker(species.id)
-            end)
-            btn:Show()
-            frame.browserButtons[#frame.browserButtons + 1] = btn
-            y = y - 24
-            count = count + 1
-            if count >= 60 then break end
+            total = total + 1
+            if count < 60 then
+                local btn = CreateFrame("Button", nil, content)
+                btn:SetSize(370, 22)
+                btn:SetPoint("TOPLEFT", 4, y)
+                btn:SetText(string.format("%03d %s (%s)", species.id, species.name, table.concat(species.types, "/")))
+                btn:SetNormalFontObject("GameFontNormalLeft")
+                btn:SetHighlightFontObject("GameFontHighlightLeft")
+                btn:SetScript("OnClick", function()
+                    frame.selectedSpeciesId = species.id
+                    for _, b in ipairs(frame.browserButtons) do b:UnlockHighlight() end
+                    btn:LockHighlight()
+                    TeamBuilder:RefreshMovePicker(species.id)
+                end)
+                btn:Show()
+                frame.browserButtons[#frame.browserButtons + 1] = btn
+                y = y - 24
+                count = count + 1
+            end
         end
     end
-    content:SetHeight(math.max(400, count * 24 + 8))
+    -- "N more" hint when the list is truncated
+    if total > count then
+        local more = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        more:SetPoint("TOPLEFT", 4, y)
+        more:SetText(string.format("... %d more — refine your search", total - count))
+        more:SetTextColor(0.8, 0.8, 0.4)
+        y = y - 20
+    end
+    content:SetHeight(math.max(400, count * 24 + math.max(0, total - count) * 20 + 8))
 end
 
 -- Show the legal moves for the selected species as 4 toggle buttons.
@@ -204,7 +238,7 @@ function TeamBuilder:RefreshMovePicker(speciesId)
         local btn = frame.moveButtons[i]
         local sel = frame.selectedMoves[i]
         if sel then
-            btn:SetText(sel)
+            btn:SetText(Moves.displayName(sel))
             btn:Show()
         else
             btn:SetText("(move " .. i .. ")")
@@ -220,10 +254,10 @@ function TeamBuilder:OpenMoveDropdown(slotIndex, legal)
     local menu = { { text = "Choose a move", isTitle = true, notCheckable = true } }
     for _, id in ipairs(legal) do
         local mv = Moves.get(id)
-        local label = id
+        local label = Moves.displayName(id)
         if mv then
-            local cat = mv.cat or "physical"
-            label = string.format("%s (%s %d/%d)", id, cat, mv.power or 0, mv.acc or 100)
+            local cat = mv.cat or Types.categoryFor(mv.type) or "physical"
+            label = string.format("%s (%s %d/%d)", label, cat, mv.power or 0, mv.acc or 100)
         end
         menu[#menu + 1] = {
             text = label,

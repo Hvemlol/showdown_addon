@@ -36,6 +36,14 @@ function BattleUI:Close()
     currentBattle = nil
 end
 
+function BattleUI:Hide()
+    if frame then frame:Hide() end
+end
+
+function BattleUI:Show()
+    if frame then frame:Show() end
+end
+
 function BattleUI:Build()
     frame = CreateFrame("Frame", "ShowdownCloneBattleFrame", UIParent, "BasicFrameTemplateWithInset")
     frame:SetSize(560, 420)
@@ -49,6 +57,25 @@ function BattleUI:Build()
     frame.title = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     frame.title:SetPoint("TOPLEFT", frame.TitleBg, "TOPLEFT", 12, -8)
     frame.title:SetText("Showdown Clone - Battle")
+
+    -- Close button + Esc-to-close
+    local closeBtn = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
+    closeBtn:SetPoint("TOPRIGHT", frame.TitleBg, "TOPRIGHT", -2, -2)
+    closeBtn:SetScript("OnClick", function()
+        -- Hiding mid-battle doesn't forfeit; the battle continues in the
+        -- background and the player can reopen it. We just hide the window.
+        BattleUI:Hide()
+    end)
+    frame:SetScript("OnKeyDown", function(self, key)
+        if key == "ESCAPE" then
+            BattleUI:Hide()
+            self:SetPropagateKeyboardInput(false)
+        else
+            self:SetPropagateKeyboardInput(true)
+        end
+    end)
+    frame:SetPropagateKeyboardInput(true)
+    tinsert(UISpecialFrames, frame:GetName())
 
     -- Foe area (top)
     frame.foeName = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
@@ -93,6 +120,34 @@ function BattleUI:Build()
         btn:SetScript("OnClick", function()
             BattleUI:ChooseMove(i)
         end)
+        btn:SetScript("OnEnter", function(self)
+            local slot = my and my.moves[i]
+            if not slot then return end
+            local mv = Moves.get(slot.id)
+            if not mv then return end
+            GameTooltip:SetOwner(self, "ANCHOR_TOP")
+            GameTooltip:SetText(Moves.displayName(slot.id), 1, 1, 1)
+            GameTooltip:AddLine(string.format("Type: %s  Power: %d  Acc: %d%%",
+                mv.type, mv.power or 0, mv.acc or 100), 0.8, 0.8, 0.8)
+            GameTooltip:AddLine(string.format("PP: %d/%d", slot.pp, slot.maxPp or mv.pp), 0.8, 0.8, 0.8)
+            local cat = mv.cat or "physical"
+            GameTooltip:AddLine("Category: " .. cat, 0.6, 0.8, 1)
+            if mv.effect then
+                local e = mv.effect
+                local parts = {}
+                if e.status then parts[#parts + 1] = e.status .. (e.statusChance and e.statusChance < 100 and (" (" .. e.statusChance .. "%)") or "") end
+                if e.boost then parts[#parts + 1] = "boost " .. e.boost.stat .. (e.boost.stages > 0 and "+" or "") .. e.boost.stages end
+                if e.recoil then parts[#parts + 1] = math.floor(e.recoil * 100) .. "% recoil" end
+                if e.drain then parts[#parts + 1] = math.floor(e.drain * 100) .. "% drain" end
+                if e.flinchChance then parts[#parts + 1] = e.flinchChance .. "% flinch" end
+                if e.highCrit then parts[#parts + 1] = "high crit" end
+                if #parts > 0 then
+                    GameTooltip:AddLine("Effect: " .. table.concat(parts, ", "), 1, 0.8, 0.4)
+                end
+            end
+            GameTooltip:Show()
+        end)
+        btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
         frame.moveButtons[i] = btn
     end
 
@@ -119,13 +174,26 @@ function BattleUI:MakeHpBar(parent, point, x, y, width)
     local bar = CreateFrame("StatusBar", nil, parent)
     bar:SetSize(width, 14)
     bar:SetPoint(point, x, y)
-    bar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
+    bar:SetStatusBarTexture("Interface/TargetingFrame/UI-StatusBar")
+    bar:SetStatusBarColor(0.2, 0.8, 0.2) -- green; Refresh recolors by HP fraction
     bar:SetMinMaxValues(0, 100)
     bar:SetValue(100)
     local bg = bar:CreateTexture(nil, "BACKGROUND")
     bg:SetAllPoints()
     bg:SetColorTexture(0.2, 0.2, 0.2, 1)
     return bar
+end
+
+-- Green/yellow/red HP bar color by remaining fraction
+function BattleUI:ColorHpBar(bar, hp, maxHp)
+    local frac = maxHp > 0 and (hp / maxHp) or 0
+    if frac > 0.5 then
+        bar:SetStatusBarColor(0.2, 0.8, 0.2)
+    elseif frac > 0.2 then
+        bar:SetStatusBarColor(0.9, 0.8, 0.1)
+    else
+        bar:SetStatusBarColor(0.9, 0.2, 0.2)
+    end
 end
 
 function BattleUI:AppendLog(msg)
@@ -165,6 +233,7 @@ function BattleUI:Refresh()
         frame.playerBar:SetMinMaxValues(0, my.maxHp)
         frame.playerBar:SetValue(my.hp)
         frame.playerBarText:SetText(hpText(my))
+        self:ColorHpBar(frame.playerBar, my.hp, my.maxHp)
     end
     if foe then
         frame.foeName:SetText(foe.name .. " Lv" .. foe.level .. statusText(foe))
@@ -172,13 +241,28 @@ function BattleUI:Refresh()
         frame.foeBar:SetMinMaxValues(0, foe.maxHp)
         frame.foeBar:SetValue(foe.hp)
         frame.foeBarText:SetText(hpText(foe))
+        self:ColorHpBar(frame.foeBar, foe.hp, foe.maxHp)
+    end
+    -- Enable move buttons only when we actually need a player choice.
+    -- This prevents the PvP double-click bug where a second click would
+    -- overwrite duel.myChoice and desync the two clients.
+    local awaiting = false
+    if not b.over then
+        awaiting = true
+        if ShowdownClone and ShowdownClone.state then
+            awaiting = ShowdownClone.state.awaitingPlayerChoice == true
+        end
     end
     for i = 1, 4 do
         local btn = frame.moveButtons[i]
         local slot = my and my.moves[i]
         if slot then
-            btn:SetText(slot.id .. " (" .. slot.pp .. ")")
-            btn:Enable()
+            btn:SetText(Moves.displayName(slot.id) .. " (" .. slot.pp .. ")")
+            if awaiting and slot.pp > 0 then
+                btn:Enable()
+            else
+                btn:Disable()
+            end
         else
             btn:SetText("--")
             btn:Disable()
@@ -193,25 +277,40 @@ function BattleUI:Refresh()
         for i = 1, 4 do frame.moveButtons[i]:Disable() end
         frame.switchBtn:Disable()
     else
-        frame.statusText:SetText(context.flavor or "Choose a move!")
+        if awaiting then
+            frame.statusText:SetText(context.flavor or "Choose a move!")
+        else
+            frame.statusText:SetText("Waiting for opponent...")
+        end
         frame.switchBtn:Enable()
     end
 end
 
 function BattleUI:ChooseMove(index)
     if not currentBattle or currentBattle.over then return end
+    -- Guard: don't accept a second choice while we're waiting (PvP lockstep)
+    if ShowdownClone and ShowdownClone.state
+        and not ShowdownClone.state.awaitingPlayerChoice then
+        return
+    end
     pendingChoice = { type = "move", index = index }
     if ShowdownClone and ShowdownClone.OnPlayerChoice then
         ShowdownClone.OnPlayerChoice(pendingChoice)
     end
+    self:Refresh()
 end
 
 function BattleUI:ChooseSwitch(index)
     if not currentBattle or currentBattle.over then return end
+    if ShowdownClone and ShowdownClone.state
+        and not ShowdownClone.state.awaitingPlayerChoice then
+        return
+    end
     pendingChoice = { type = "switch", index = index }
     if ShowdownClone and ShowdownClone.OnPlayerChoice then
         ShowdownClone.OnPlayerChoice(pendingChoice)
     end
+    self:Refresh()
 end
 
 function BattleUI:Forfeit()
@@ -220,6 +319,7 @@ function BattleUI:Forfeit()
     if ShowdownClone and ShowdownClone.OnPlayerChoice then
         ShowdownClone.OnPlayerChoice(pendingChoice)
     end
+    self:Refresh()
 end
 
 function BattleUI:ShowSwitchMenu()

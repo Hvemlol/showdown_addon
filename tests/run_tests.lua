@@ -106,6 +106,23 @@ do
     eq(PokemonData.get(113).base.spa, 105, "Chansey Gen 1 Special = 105")
     eq(PokemonData.get(113).base.spd, 105, "Chansey Gen 1 Special (def) = 105")
 
+    -- Moves.displayName: human-readable names for the UI
+    eq(Moves.displayName("ThunderPunch"), "Thunder Punch", "displayName splits PascalCase")
+    eq(Moves.displayName("Tackle"), "Tackle", "displayName single word")
+    eq(Moves.displayName("HornDrill2"), "Horn Drill", "displayName strips 2-suffix and splits")
+    eq(Moves.displayName("LeechLife2"), "Leech Life", "displayName Leech Life")
+    eq(Moves.displayName("PoisonSting"), "Poison Sting", "displayName Poison Sting")
+    eq(Moves.displayName("HyperBeam"), "Hyper Beam", "displayName Hyper Beam")
+    eq(Moves.displayName("Smokescreen2"), "Smokescreen", "displayName strips 2-suffix")
+    -- displayName is cached and stable
+    eq(Moves.displayName("ThunderPunch"), Moves.displayName("ThunderPunch"), "displayName stable/cached")
+    -- every move id produces a non-empty display name
+    for id in pairs(Moves.list) do
+        local dn = Moves.displayName(id)
+        ok(type(dn) == "string" and #dn > 0, "displayName non-empty for " .. id)
+        ok(not dn:match("2$"), "displayName has no trailing 2 for " .. id .. " (got '" .. dn .. "')")
+    end
+
     -- bot teams reference valid species and moves
     for _, def in ipairs(Bot.TEAMS) do
         ok(#def.team >= 1 and #def.team <= 6, "Bot " .. def.name .. " has 1-6 Pokemon")

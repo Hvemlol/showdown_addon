@@ -31,8 +31,20 @@ leveling, no money — exactly like Showdown.
 | `/showdown bots` | List all practice bots |
 | `/showdown duel <player>` | Challenge a player to a PvP duel |
 | `/showdown accept` / `/showdown decline` | Respond to a duel challenge |
+| `/showdown cancel` | Cancel your pending duel challenge |
 | `/showdown team` | Print your team to chat |
 | `/showdown record` | Show your win/loss record |
+
+### WoW integration notes
+- Both windows (team builder, battle) support **Esc to close** and have a
+  standard close button.
+- You **cannot start or accept a battle while in combat**; the battle window
+  auto-hides when you enter combat and reappears when you leave.
+- Duel challenges **expire after 60 seconds** if the target doesn't respond
+  (or use `/showdown cancel`).
+- Move buttons show human-readable names and **tooltips** (type, power,
+  accuracy, PP, category, effect) on hover.
+- HP bars are color-coded green/yellow/red by remaining HP.
 
 ## Project layout
 

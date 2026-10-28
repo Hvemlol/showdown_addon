@@ -4,6 +4,7 @@ local ADDON = "ShowdownClone"
 
 local BattleEngine = require("Core.BattleEngine")
 local PokemonData = require("Core.Data.Pokemon")
+local Moves = require("Core.Data.Moves")
 local Bot = require("Core.Bot")
 local PRNG = require("Core.Util.PRNG")
 local Serializer = require("Core.Util.Serializer")
@@ -26,12 +27,18 @@ local state = {
     battleMode = nil,         -- "bot" | "pvp"
     battleContext = nil,      -- bot def or pvp info
     awaitingPlayerChoice = false,
+    battleUiHidden = false,   -- true if the battle window was auto-hidden on combat
     pvp = {
-        pendingChallenge = nil, -- { from, to, teamSize }
-        activeDuel = nil,       -- { opponent, seed, isChallenger, myChoice, foeChoice, turn }
+        pendingChallenge = nil,    -- { from, to, teamSize }
+        challengeExpiry = nil,     -- GetTime() when the pending challenge expires
+        challengeTimer = nil,      -- timer handle for the expiry check
+        activeDuel = nil,          -- { opponent, seed, isChallenger, myChoice, foeChoice, turn }
     },
 }
 ShowdownClone.state = state
+
+-- How long a duel challenge stays open waiting for a response (seconds)
+local CHALLENGE_TIMEOUT = 60
 
 local function printMsg(msg)
     DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[Showdown]|r " .. msg)
@@ -58,8 +65,9 @@ function ShowdownClone:OnEnable()
     end)
 
     eventFrame:RegisterEvent("ADDON_LOADED")
-    eventFrame:RegisterEvent("PLAYER_LOGOUT")
     eventFrame:RegisterEvent("CHAT_MSG_ADDON")
+    eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED") -- entering combat
+    eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")  -- leaving combat
 
     RegisterAddonMessagePrefix(Net.PREFIX)
 
@@ -84,6 +92,10 @@ eventFrame:SetScript("OnEvent", function(_, event, ...)
         if prefix == Net.PREFIX then
             ShowdownClone:OnAddonMessage(sender, text)
         end
+    elseif event == "PLAYER_REGEN_DISABLED" then
+        ShowdownClone:OnEnterCombat()
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        ShowdownClone:OnLeaveCombat()
     end
 end)
 
@@ -111,6 +123,8 @@ function ShowdownClone:SlashHandler(msg)
         self:AcceptChallenge()
     elseif cmd == "decline" then
         self:DeclineChallenge()
+    elseif cmd == "cancel" then
+        self:CancelChallenge()
     elseif cmd == "record" then
         local r = ShowdownCloneDB.record or { wins = 0, losses = 0 }
         printMsg(string.format("Record: %d wins, %d losses", r.wins, r.losses))
@@ -128,6 +142,7 @@ function ShowdownClone:PrintHelp()
     printMsg("/showdown bots - list practice bots")
     printMsg("/showdown duel <player> - PvP duel")
     printMsg("/showdown accept|decline - respond to a duel")
+    printMsg("/showdown cancel - cancel your pending duel challenge")
     printMsg("/showdown team - print your team")
     printMsg("/showdown record - show your win/loss record")
 end
@@ -140,9 +155,9 @@ function ShowdownClone:PrintTeam()
     end
     printMsg("Your team:")
     for i, p in ipairs(team) do
-        local moveIds = {}
-        for _, m in ipairs(p.moves) do moveIds[#moveIds + 1] = m.id end
-        printMsg(string.format("  %d. %s Lv%d - %s", i, p.name, p.level, table.concat(moveIds, ", ")))
+        local moveNames = {}
+        for _, m in ipairs(p.moves) do moveNames[#moveNames + 1] = Moves.displayName(m.id) end
+        printMsg(string.format("  %d. %s Lv%d - %s", i, p.name, p.level, table.concat(moveNames, ", ")))
     end
 end
 
@@ -177,6 +192,7 @@ end
 
 -- Bot battle (practice)
 function ShowdownClone:StartBotBattle(index)
+    if not self:CanStartBattle() then return end
     local team = self:GetLiveTeam()
     if #team == 0 then
         printMsg("You need a team first! Open the team builder with /showdown ui.")
@@ -211,6 +227,24 @@ function ShowdownClone.OnPlayerChoice(choice)
     local b = state.activeBattle
     if not b or b.over then return end
 
+    -- Forfeit: end immediately, notify opponent in PvP
+    if choice.type == "forfeit" then
+        if state.battleMode == "pvp" and state.pvp.activeDuel then
+            local msg = Net.buildResign(UnitName("player"), state.pvp.activeDuel.opponent)
+            ShowdownClone:SendAddonMessage(msg, state.pvp.activeDuel.opponent)
+        end
+        b.over = true
+        b.winner = (state.battleMode == "pvp" and state.pvp.activeDuel and not state.pvp.activeDuel.isChallenger) and 1 or 2
+        BattleUI:AppendLog("You forfeited the battle!")
+        BattleUI:Refresh()
+        if state.battleMode == "pvp" then
+            printMsg("You forfeited the duel.")
+            state.pvp.activeDuel = nil
+        end
+        ShowdownClone:OnBattleEnd(b)
+        return
+    end
+
     if state.battleMode == "pvp" and state.pvp.activeDuel then
         local duel = state.pvp.activeDuel
         duel.myChoice = choice
@@ -237,6 +271,7 @@ end
 function ShowdownClone:OnBattleEnd(b)
     state.activeBattle = nil
     state.awaitingPlayerChoice = false
+    state.battleUiHidden = false
     BattleUI:Refresh()
     local mySide = (state.battleMode == "pvp" and state.pvp.activeDuel and not state.pvp.activeDuel.isChallenger) and 2 or 1
     if b.winner == mySide then
@@ -250,12 +285,41 @@ function ShowdownClone:OnBattleEnd(b)
     end
 end
 
+----------------------------------------------------------------------
+-- Combat safety: refuse to start battles in combat; auto-hide the
+-- battle window while in combat and restore it afterwards.
+----------------------------------------------------------------------
+function ShowdownClone:OnEnterCombat()
+    if state.activeBattle and BattleUI:IsOpen() then
+        BattleUI:Hide()
+        state.battleUiHidden = true
+    end
+end
+
+function ShowdownClone:OnLeaveCombat()
+    if state.battleUiHidden and state.activeBattle then
+        BattleUI:Show()
+        BattleUI:Refresh()
+    end
+    state.battleUiHidden = false
+end
+
+-- Returns true if the player can start a battle right now.
+function ShowdownClone:CanStartBattle()
+    if InCombatLockdown() then
+        printMsg("You can't start a Pokemon battle while in combat!")
+        return false
+    end
+    return true
+end
+
 -- PvP
 function ShowdownClone:ChallengePlayer(targetName)
     if not targetName or targetName == "" then
         printMsg("Usage: /showdown duel <player name>")
         return
     end
+    if not self:CanStartBattle() then return end
     local myName = UnitName("player")
     if targetName:lower() == myName:lower() then
         printMsg("You can't duel yourself!")
@@ -269,13 +333,67 @@ function ShowdownClone:ChallengePlayer(targetName)
     local msg = Net.buildChallenge(myName, targetName, #team)
     self:SendAddonMessage(msg, targetName)
     state.pvp.pendingChallenge = { from = myName, to = targetName, teamSize = #team }
-    printMsg("Challenge sent to " .. targetName .. ". Waiting for response...")
+    state.pvp.challengeExpiry = GetTime() + CHALLENGE_TIMEOUT
+    self:StartChallengeTimer()
+    printMsg("Challenge sent to " .. targetName .. ". Waiting for response... (expires in " .. CHALLENGE_TIMEOUT .. "s, or /showdown cancel)")
+end
+
+-- Poll the pending outgoing challenge; expire it after CHALLENGE_TIMEOUT.
+function ShowdownClone:StartChallengeTimer()
+    if state.pvp.challengeTimer then return end
+    local timer = CreateFrame("Frame")
+    state.pvp.challengeTimer = timer
+    timer:SetScript("OnUpdate", function(self, elapsed)
+        self.elapsed = (self.elapsed or 0) + elapsed
+        if self.elapsed < 1 then return end
+        self.elapsed = 0
+        local pvp = state.pvp
+        if not pvp.pendingChallenge or not pvp.challengeExpiry then
+            self:Hide()
+            state.pvp.challengeTimer = nil
+            return
+        end
+        if GetTime() >= pvp.challengeExpiry then
+            printMsg("Your duel challenge to " .. pvp.pendingChallenge.to .. " expired (no response).")
+            pvp.pendingChallenge = nil
+            pvp.challengeExpiry = nil
+            self:Hide()
+            state.pvp.challengeTimer = nil
+        end
+    end)
+end
+
+function ShowdownClone:StopChallengeTimer()
+    if state.pvp.challengeTimer then
+        state.pvp.challengeTimer:Hide()
+        state.pvp.challengeTimer = nil
+    end
+    state.pvp.challengeExpiry = nil
+end
+
+-- /showdown cancel — cancel our own outgoing challenge
+function ShowdownClone:CancelChallenge()
+    local ch = state.pvp.pendingChallenge
+    if not ch then
+        printMsg("No pending challenge to cancel.")
+        return
+    end
+    local myName = UnitName("player")
+    local msg = Net.buildChallengeResponse(myName, ch.to, false, "cancelled")
+    self:SendAddonMessage(msg, ch.to)
+    state.pvp.pendingChallenge = nil
+    self:StopChallengeTimer()
+    printMsg("Challenge to " .. ch.to .. " cancelled.")
 end
 
 function ShowdownClone:AcceptChallenge()
     local ch = state.pvp.pendingChallenge
     if not ch then
         printMsg("No pending challenge.")
+        return
+    end
+    if not self:CanStartBattle() then
+        printMsg("You can't accept a duel while in combat!")
         return
     end
     local myName = UnitName("player")
@@ -358,11 +476,19 @@ function ShowdownClone:OnAddonMessage(sender, text)
         printMsg(data.from .. " challenges you to a Pokemon duel! Type /showdown accept or /showdown decline.")
     elseif msgType == Net.MSG.CHALLENGE_RESP then
         if not data.accepted then
-            printMsg(data.from .. " declined your duel.")
-            state.pvp.pendingChallenge = nil
+            if state.pvp.pendingChallenge and state.pvp.pendingChallenge.to:lower() == sender:lower() then
+                if data.reason == "cancelled" then
+                    printMsg(data.from .. " cancelled the duel challenge.")
+                else
+                    printMsg(data.from .. " declined your duel.")
+                end
+                state.pvp.pendingChallenge = nil
+                self:StopChallengeTimer()
+            end
         elseif state.pvp.pendingChallenge and state.pvp.pendingChallenge.to:lower() == sender:lower() then
             self:StartDuelAsChallenger(sender)
             state.pvp.pendingChallenge = nil
+            self:StopChallengeTimer()
         end
     elseif msgType == Net.MSG.START then
         self:StartDuelAsOpponent(data.from, data.seed, data.team)
@@ -370,9 +496,12 @@ function ShowdownClone:OnAddonMessage(sender, text)
         self:OnFoeChoice(data)
     elseif msgType == Net.MSG.RESIGN then
         printMsg(data.from .. " resigned. You win the duel!")
-        if state.activeBattle then
+        if state.activeBattle and not state.activeBattle.over then
+            -- Determine which side the resigning player controls
+            local duel = state.pvp.activeDuel
+            local mySide = (duel and not duel.isChallenger) and 2 or 1
             state.activeBattle.over = true
-            state.activeBattle.winner = 2
+            state.activeBattle.winner = mySide
             BattleUI:Refresh()
             self:OnBattleEnd(state.activeBattle)
         end
