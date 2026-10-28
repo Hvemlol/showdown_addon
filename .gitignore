@@ -1,0 +1,4 @@
+*.luac
+__pycache__/
+*.pyc
+.vibe/
