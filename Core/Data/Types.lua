@@ -8,37 +8,42 @@ Types.list = {
 Types.index = {}
 for i, name in ipairs(Types.list) do Types.index[name] = i end
 
+-- Gen 1 splits physical/special by move TYPE, not by move:
+--   physical: Normal, Fighting, Poison, Ground, Flying, Bug, Rock, Ghost
+--   special:  Fire, Water, Electric, Grass, Ice, Psychic, Dragon
 Types.CATEGORIES = {
     Normal = "physical", Fire = "special", Water = "special",
     Electric = "special", Grass = "special", Ice = "special",
     Fighting = "physical", Poison = "physical", Ground = "physical",
-    Flying = "physical", Psychic = "special", Bug = "special",
+    Flying = "physical", Psychic = "special", Bug = "physical",
     Rock = "physical", Ghost = "physical", Dragon = "special",
 }
 
--- Gen 1 defensive chart with the era's quirks:
--- Bug super-effective against Poison, Poison super-effective against Bug,
--- Ghost has no effect on Psychic (the famous Gen 1 bug),
--- Ice is not very effective against Fire.
+-- Gen 1 defensive chart (attacking type -> defending type -> multiplier)
+-- with the era's quirks, matching Pokemon Showdown's gen1 mod:
+--   Bug is super-effective against Poison AND Poison is super-effective
+--   against Bug (Gen 1 only),
+--   Ghost has no effect on Psychic (the famous Gen 1 bug),
+--   Ice deals NEUTRAL damage to Fire (the 0.5x was introduced in Gen 2).
 --[type] = { [defendingType] = multiplier }
 local NONE, NV = 0, 0.5
 local SE, RES = 2, 0.5
 
 Types.chart = {
-    Normal   = { Rock = RES, Ghost = NONE },
-    Fire     = { Fire = RES, Water = NV, Grass = SE, Ice = SE, Bug = SE, Rock = NV, Dragon = RES },
-    Water    = { Fire = SE, Water = RES, Grass = NV, Ground = SE, Rock = SE, Dragon = RES },
-    Electric = { Water = SE, Electric = RES, Grass = RES, Ground = NONE, Flying = SE, Dragon = RES },
-    Grass    = { Fire = NV, Water = SE, Grass = RES, Poison = NV, Ground = SE, Flying = NV, Bug = NV, Rock = SE, Dragon = RES },
-    Ice      = { Fire = NV, Water = NV, Grass = SE, Ice = RES, Ground = SE, Flying = SE, Dragon = SE },
-    Fighting = { Normal = SE, Ice = SE, Poison = NV, Flying = NV, Psychic = NV, Bug = RES, Rock = SE, Ghost = NONE },
-    Poison   = { Grass = SE, Poison = RES, Ground = NV, Rock = NV, Ghost = RES, Bug = SE },
-    Ground   = { Fire = SE, Electric = SE, Grass = NV, Poison = SE, Flying = NONE, Bug = RES, Rock = SE },
-    Flying   = { Electric = NV, Grass = SE, Fighting = SE, Bug = SE, Rock = NV },
+    Normal   = { Ghost = NONE, Rock = RES },
+    Fire     = { Bug = SE, Dragon = RES, Fire = RES, Grass = SE, Ice = SE, Rock = RES, Water = RES },
+    Water    = { Dragon = RES, Fire = SE, Grass = RES, Ground = SE, Rock = SE, Water = RES },
+    Electric = { Dragon = RES, Electric = RES, Flying = SE, Grass = RES, Ground = NONE, Water = SE },
+    Grass    = { Bug = RES, Dragon = RES, Fire = RES, Flying = RES, Grass = RES, Ground = SE, Poison = RES, Rock = SE, Water = SE },
+    Ice      = { Dragon = SE, Flying = SE, Grass = SE, Ground = SE, Ice = RES, Water = RES },
+    Fighting = { Bug = RES, Flying = RES, Ghost = NONE, Ice = SE, Normal = SE, Poison = RES, Psychic = RES, Rock = SE },
+    Poison   = { Bug = SE, Ghost = RES, Grass = SE, Ground = RES, Poison = RES, Rock = RES },
+    Ground   = { Bug = RES, Electric = SE, Fire = SE, Flying = NONE, Grass = RES, Poison = SE, Rock = SE },
+    Flying   = { Bug = SE, Electric = RES, Fighting = SE, Grass = SE, Rock = RES },
     Psychic  = { Fighting = SE, Poison = SE, Psychic = RES },
-    Bug      = { Fire = NV, Grass = SE, Fighting = RES, Poison = SE, Flying = RES, Psychic = SE, Ghost = RES },
-    Rock     = { Fire = SE, Ice = SE, Fighting = NV, Ground = NV, Flying = SE, Bug = SE },
-    Ghost    = { Normal = NONE, Psychic = NONE, Ghost = SE },
+    Bug      = { Fighting = RES, Fire = RES, Flying = RES, Ghost = RES, Grass = SE, Poison = SE, Psychic = SE },
+    Rock     = { Bug = SE, Fighting = RES, Fire = SE, Flying = SE, Ground = RES, Ice = SE },
+    Ghost    = { Ghost = SE, Normal = NONE, Psychic = NONE },
     Dragon   = { Dragon = SE },
 }
 

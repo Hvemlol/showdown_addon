@@ -348,28 +348,53 @@ function BattleEngine:useMove(attackerSide, moveIndex, defenderSide)
         return result
     end
 
-    local damage = self:calcDamage(atk, def, move)
-    result.hit = true
-    result.damage = damage
-    -- Substitute absorbs the hit
-    if def.volatile.substitute and damage > 0 then
-        def.volatile.substitute = def.volatile.substitute - damage
-        if def.volatile.substitute <= 0 then
-            def.volatile.substitute = nil
-            self:logMsg(def.name .. "'s substitute broke!")
+    -- Multi-hit moves (Gen 1: 2-5 hits for {2,5} moves, fixed count otherwise)
+    local hitCount = 1
+    if move.hits then
+        if type(move.hits) == "table" then
+            -- Gen 1 distribution for 2-5 hit moves: 2 hits 3/8, 3 hits 3/8,
+            -- 4 hits 1/8, 5 hits 1/8
+            local roll = self.rng:nextFloat()
+            if roll < 0.375 then hitCount = 2
+            elseif roll < 0.75 then hitCount = 3
+            elseif roll < 0.875 then hitCount = 4
+            else hitCount = 5 end
         else
-            self:logMsg(def.name .. "'s substitute took the hit! (" .. damage .. ")")
+            hitCount = move.hits
         end
-        def.lastDamageTaken = 0
-    else
-        def.hp = math.max(0, def.hp - damage)
-        def.lastDamageTaken = damage
     end
+
+    local totalDamage = 0
+    for hit = 1, hitCount do
+        local damage = self:calcDamage(atk, def, move)
+        totalDamage = totalDamage + damage
+        -- Substitute absorbs the hit
+        if def.volatile.substitute and damage > 0 then
+            def.volatile.substitute = def.volatile.substitute - damage
+            if def.volatile.substitute <= 0 then
+                def.volatile.substitute = nil
+                self:logMsg(def.name .. "'s substitute broke!")
+            else
+                self:logMsg(def.name .. "'s substitute took the hit! (" .. damage .. ")")
+            end
+            def.lastDamageTaken = 0
+        else
+            def.hp = math.max(0, def.hp - damage)
+            def.lastDamageTaken = damage
+        end
+        if def.hp <= 0 then break end
+    end
+    result.hit = true
+    result.damage = totalDamage
 
     local effText = ""
     if mult >= 2 then effText = " It's super effective!"
     elseif mult > 0 and mult < 1 then effText = " It's not very effective..." end
-    self:logMsg("It dealt " .. damage .. " damage!" .. effText)
+    if hitCount > 1 then
+        self:logMsg("It hit " .. hitCount .. " times! It dealt " .. totalDamage .. " damage!" .. effText)
+    else
+        self:logMsg("It dealt " .. totalDamage .. " damage!" .. effText)
+    end
 
     if self._lastCrit then
         self:logMsg("A critical hit!")
@@ -377,7 +402,7 @@ function BattleEngine:useMove(attackerSide, moveIndex, defenderSide)
     self._lastCrit = nil
 
     if move.effect then
-        self:applyEffect(atk, def, move, damage, result)
+        self:applyEffect(atk, def, move, totalDamage, result)
     end
 
     if def.hp <= 0 then result.ko = true end
@@ -396,6 +421,11 @@ function BattleEngine:calcDamage(atk, def, move)
     if move.fixed == 40 then return 40 end
     if move.fixed == 20 then return 20 end
     if move.fixed == "half" then return math.max(1, math.floor(def.hp / 2)) end
+    -- OHKO moves (Horn Drill, Fissure): KO on hit if user's level >= target's
+    if move.fixed == "ohko" then
+        if atk.level >= def.level then return def.hp end
+        return 0
+    end
     if move.fixed == "counter" then
         local taken = def.lastDamageTaken or 0
         if taken <= 0 or def.lastMoveType ~= "physical" then return 0 end

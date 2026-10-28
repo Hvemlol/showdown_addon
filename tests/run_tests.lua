@@ -77,6 +77,35 @@ do
         ok(m.power >= 0, "Move " .. id .. " power >= 0")
     end
 
+    -- Gen 1 category is determined by move TYPE (physical/special types)
+    eq(Types.categoryFor("Bug"), "physical", "Gen 1: Bug is a physical type")
+    eq(Types.categoryFor("Poison"), "physical", "Gen 1: Poison is a physical type")
+    eq(Types.categoryFor("Ghost"), "physical", "Gen 1: Ghost is a physical type")
+    eq(Types.categoryFor("Fire"), "special", "Gen 1: Fire is a special type")
+    eq(Types.categoryFor("Ice"), "special", "Gen 1: Ice is a special type")
+    eq(Types.categoryFor("Dragon"), "special", "Gen 1: Dragon is a special type")
+
+    -- Elemental punches are SPECIAL in Gen 1 (Electric/Fire/Ice are special types)
+    eq(Moves.get("ThunderPunch").cat, nil, "ThunderPunch has no cat override (special via type)")
+    eq(Types.categoryFor(Moves.get("ThunderPunch").type), "special", "ThunderPunch is special in Gen 1")
+    eq(Types.categoryFor(Moves.get("FirePunch").type), "special", "FirePunch is special in Gen 1")
+    eq(Types.categoryFor(Moves.get("IcePunch").type), "special", "IcePunch is special in Gen 1")
+
+    -- Bug moves are PHYSICAL in Gen 1
+    eq(Types.categoryFor(Moves.get("LeechLife2").type), "physical", "Leech Life is physical in Gen 1")
+    eq(Types.categoryFor(Moves.get("PinMissile").type), "physical", "Pin Missile is physical in Gen 1")
+    eq(Types.categoryFor(Moves.get("Twineedle").type), "physical", "Twineedle is physical in Gen 1")
+
+    -- Horn Drill is an OHKO move: 30% acc, 5 PP, KOs on hit
+    local hd = Moves.get("HornDrill2")
+    eq(hd.acc, 30, "Horn Drill accuracy 30")
+    eq(hd.pp, 5, "Horn Drill PP 5")
+    eq(hd.fixed, "ohko", "Horn Drill is an OHKO move")
+
+    -- Chansey Gen 1 Special is 105 (not the modern SpA 35 / SpD 105 split)
+    eq(PokemonData.get(113).base.spa, 105, "Chansey Gen 1 Special = 105")
+    eq(PokemonData.get(113).base.spd, 105, "Chansey Gen 1 Special (def) = 105")
+
     -- bot teams reference valid species and moves
     for _, def in ipairs(Bot.TEAMS) do
         ok(#def.team >= 1 and #def.team <= 6, "Bot " .. def.name .. " has 1-6 Pokemon")
@@ -102,7 +131,12 @@ do
     eq(Types.getEffectiveness("Normal", "Ghost"), 0, "Normal no effect vs Ghost")
     eq(Types.getEffectiveness("Ghost", "Psychic"), 0, "Gen 1: Ghost no effect vs Psychic")
     eq(Types.getEffectiveness("Bug", "Poison"), 2, "Gen 1: Bug SE vs Poison")
-    eq(Types.getEffectiveness("Ice", "Fire"), 0.5, "Gen 1: Ice NVE vs Fire")
+    eq(Types.getEffectiveness("Poison", "Bug"), 2, "Gen 1: Poison SE vs Bug")
+    eq(Types.getEffectiveness("Ice", "Fire"), 1, "Gen 1: Ice neutral vs Fire (0.5x is Gen 2+)")
+    eq(Types.getEffectiveness("Poison", "Ground"), 0.5, "Poison NVE vs Ground")
+    eq(Types.getEffectiveness("Poison", "Rock"), 0.5, "Poison NVE vs Rock")
+    eq(Types.getEffectiveness("Grass", "Fire"), 0.5, "Grass NVE vs Fire")
+    eq(Types.getEffectiveness("Grass", "Water"), 2, "Grass SE vs Water")
     eq(Types.getEffectivenessVs("Water", "Fire", "Flying"), 2, "Water SE vs Fire, neutral vs Flying")
     eq(Types.getEffectivenessVs("Electric", "Water", "Dragon"), 1, "Electric SE vs Water, NVE vs Dragon")
     eq(Types.getEffectivenessVs("Ice", "Grass", "Flying"), 4, "Ice SE vs Grass/Flying")
@@ -313,6 +347,56 @@ do
     local over8 = b8:runTurn({ [1] = { type = "forfeit" } })
     ok(over8, "forfeit ends battle")
     eq(b8.winner, 2, "forfeit gives opponent the win")
+
+    -- OHKO move (Horn Drill): KOs when user level >= target level
+    local bOhko = BattleEngine.newBattle(
+        { BattleEngine.newPokemon(34, 100, { moves = { "HornDrill2" } }) }, -- Nidoking L100
+        { BattleEngine.newPokemon(113, 100) },                              -- Chansey L100
+        { seed = 42 })
+    -- Force a hit by checking calcDamage directly (accuracy is 30%, so we
+    -- test the damage value, not the hit chance)
+    local nido = bOhko:active(1)
+    local chansey = bOhko:active(2)
+    local hdMove = Moves.get("HornDrill2")
+    eq(bOhko:calcDamage(nido, chansey, hdMove), chansey.hp, "Horn Drill OHKO damage = target HP (equal level)")
+
+    -- OHKO fails when user level < target level
+    local bOhko2 = BattleEngine.newBattle(
+        { BattleEngine.newPokemon(34, 50, { moves = { "HornDrill2" } }) }, -- Nidoking L50
+        { BattleEngine.newPokemon(113, 100) },                            -- Chansey L100
+        { seed = 42 })
+    eq(bOhko2:calcDamage(bOhko2:active(1), bOhko2:active(2), hdMove), 0, "Horn Drill fails when user level < target level")
+
+    -- Multi-hit move deals multiple hits
+    local bMulti = BattleEngine.newBattle(
+        { BattleEngine.newPokemon(6, 100, { moves = { "PinMissile" } }) }, -- Charizard with Pin Missile
+        { BattleEngine.newPokemon(113, 100) },                             -- Chansey
+        { seed = 123 })
+    local pinMissile = Moves.get("PinMissile")
+    local dmg = bMulti:calcDamage(bMulti:active(1), bMulti:active(2), pinMissile)
+    ok(dmg > 0, "Pin Missile calcDamage > 0 per hit")
+    -- Run a full useMove and verify total damage is a multiple of per-hit damage
+    local hpBeforeMulti = bMulti:active(2).hp
+    -- Pin Missile has 85 acc; retry seeds until it hits
+    local hitResult
+    for s = 1, 50 do
+        local bt = BattleEngine.newBattle(
+            { BattleEngine.newPokemon(6, 100, { moves = { "PinMissile" } }) },
+            { BattleEngine.newPokemon(113, 100) },
+            { seed = s })
+        local r = bt:useMove(1, 1)
+        if r.hit and not r.immune then
+            hitResult = r
+            break
+        end
+    end
+    ok(hitResult ~= nil and hitResult.hit, "Pin Missile eventually hits")
+    if hitResult then
+        local perHit = bMulti:calcDamage(bMulti:active(1), bMulti:active(2), pinMissile)
+        ok(perHit > 0, "Pin Missile per-hit damage > 0")
+        -- total damage should be >= 2x per-hit (at least 2 hits)
+        ok(hitResult.damage >= perHit * 2, "Pin Missile multi-hit total >= 2x per-hit damage")
+    end
 end
 
 ----------------------------------------------------------------------

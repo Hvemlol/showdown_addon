@@ -263,16 +263,16 @@ add(111, "Rhyhorn", "Ground", "Rock", 80, 85, 95, 30, 25,
     { {1,"HornAttack2"}, {30,"Stomp2"}, {35,"TailWhip"}, {40,"FuryAttack2"}, {45,"HornDrill2"}, {50,"Earthquake"} })
 add(112, "Rhydon", "Ground", "Rock", 105, 130, 120, 45, 40,
     { {1,"HornAttack2"}, {30,"Stomp2"}, {35,"TailWhip"}, {40,"FuryAttack2"}, {48,"HornDrill2"}, {55,"Earthquake"} })
-add(113, "Chansey", "Normal", nil, 250, 5, 5, 50, 50,
+add(113, "Chansey", "Normal", nil, 250, 5, 5, 105, 50,
     { {1,"Pound2"}, {12,"TailWhip"}, {24,"SoftBoiled"}, {30,"DoubleSlap2"}, {38,"Minimize2"}, {44,"DefenseCurl2"}, {48,"LightScreen2"} })
 add(114, "Tangela", "Grass", nil, 65, 55, 115, 100, 60,
     { {1,"Absorb"}, {24,"Bind2"}, {27,"StunSpore"}, {29,"PoisonSting"}, {32,"SleepPowder"}, {36,"Slam2"}, {41,"Growth2"} })
 add(115, "Kangaskhan", "Normal", nil, 105, 95, 80, 40, 90,
     { {1,"CometPunch2"}, {26,"Bite2"}, {31,"TailWhip"}, {36,"MegaPunch"}, {41,"Leer"}, {46,"DizzyPunch2"} })
 add(116, "Horsea", "Water", nil, 30, 40, 70, 70, 60,
-    { {1,"Bubble2"}, {19,"SmokeScreen2"}, {24,"Leer"}, {30,"WaterGun"}, {37,"Agility"}, {45,"HydroPump"} })
+    { {1,"Bubble2"}, {19,"Smokescreen2"}, {24,"Leer"}, {30,"WaterGun"}, {37,"Agility"}, {45,"HydroPump"} })
 add(117, "Seadra", "Water", nil, 55, 65, 95, 95, 85,
-    { {1,"Bubble2"}, {19,"SmokeScreen2"}, {24,"Leer"}, {30,"WaterGun"}, {41,"Agility"}, {52,"HydroPump"} })
+    { {1,"Bubble2"}, {19,"Smokescreen2"}, {24,"Leer"}, {30,"WaterGun"}, {41,"Agility"}, {52,"HydroPump"} })
 add(118, "Goldeen", "Water", nil, 45, 67, 60, 50, 63,
     { {1,"Peck"}, {19,"Supersonic"}, {24,"HornAttack2"}, {30,"FuryAttack2"}, {37,"Waterfall"}, {45,"HornDrill2"} })
 add(119, "Seaking", "Water", nil, 80, 92, 65, 80, 68,
@@ -292,7 +292,7 @@ add(124, "Jynx", "Ice", "Psychic", 65, 50, 35, 95, 95,
 add(125, "Electabuzz", "Electric", nil, 65, 83, 57, 85, 105,
     { {1,"QuickAttack"}, {34,"ThunderShock"}, {37,"LightScreen2"}, {42,"ThunderPunch"}, {49,"Thunder"} })
 add(126, "Magmar", "Fire", nil, 65, 95, 57, 85, 93,
-    { {1,"Ember"}, {36,"Leer"}, {39,"SmokeScreen2"}, {43,"FirePunch"}, {48,"Smog"}, {54,"Flamethrower"} })
+    { {1,"Ember"}, {36,"Leer"}, {39,"Smokescreen2"}, {43,"FirePunch"}, {48,"Smog"}, {54,"Flamethrower"} })
 add(127, "Pinsir", "Bug", nil, 65, 125, 100, 55, 85,
     { {1,"ViseGrip2"}, {25,"Bind2"}, {30,"SeismicToss"}, {36,"Harden"}, {43,"Slash"}, {49,"Submission"} })
 add(128, "Tauros", "Normal", nil, 75, 100, 95, 70, 110,
